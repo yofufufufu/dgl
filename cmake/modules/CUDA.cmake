@@ -10,20 +10,25 @@ endif()
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-std=c++14"   SUPPORT_CXX14)
 
-set(dgl_known_gpu_archs "35" "50" "60" "70")
-set(dgl_cuda_arch_ptx "70")
-if (CUDA_VERSION_MAJOR GREATER_EQUAL "11")
-  list(APPEND dgl_known_gpu_archs "80")
-  set(dgl_cuda_arch_ptx "80")
-endif()
+#set(dgl_known_gpu_archs "35" "50" "60" "70")
+#set(dgl_cuda_arch_ptx "70")
+#if (CUDA_VERSION_MAJOR GREATER_EQUAL "11")
+#  list(APPEND dgl_known_gpu_archs "80")
+#  set(dgl_cuda_arch_ptx "80")
+#endif()
 # CMake 3.5 doesn't support VERSION_GREATER_EQUAL
-if (NOT CUDA_VERSION VERSION_LESS "11.8")
-  list(APPEND dgl_known_gpu_archs "90")
-  set(dgl_cuda_arch_ptx "90")
-endif()
-if (NOT CUDA_VERSION VERSION_LESS "12.0")
-  list(REMOVE_ITEM dgl_known_gpu_archs "35")
-endif()
+#if (NOT CUDA_VERSION VERSION_LESS "11.8")
+#  list(APPEND dgl_known_gpu_archs "90")
+#  set(dgl_cuda_arch_ptx "90")
+#endif()
+#if (NOT CUDA_VERSION VERSION_LESS "12.0")
+#  list(REMOVE_ITEM dgl_known_gpu_archs "35")
+#endif()
+
+# explicitly set by myself
+set(dgl_known_gpu_archs "86")
+set(dgl_cuda_arch_ptx "86")
+
 
 ################################################################################################
 # A function for automatic detection of GPUs installed  (if autodetection is enabled)
@@ -309,6 +314,9 @@ macro(dgl_config_cuda out_variable)
   check_cxx_compiler_flag("-std=c++14"    SUPPORT_CXX14)
   string(REPLACE "-std=c++11" "" CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS}")
   list(APPEND CUDA_NVCC_FLAGS "-std=c++14")
+
+  # add debug info
+  list(APPEND CUDA_NVCC_FLAGS "-g;-G;-O0;--source-in-ptx")
 
   message(STATUS "CUDA flags: ${CUDA_NVCC_FLAGS}")
 
