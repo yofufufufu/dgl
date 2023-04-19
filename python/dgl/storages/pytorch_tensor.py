@@ -45,7 +45,9 @@ class PyTorchTensorStorage(BaseTensorStorage):
                     )
             # CPU to CPU or CUDA - use pin_memory and async transfer if possible
             else:
-                return _fetch_cpu(
+                # change code for nvtx
+                torch.cuda.nvtx.range_push("fetch_cpu")
+                fetch_cpu_res = _fetch_cpu(
                     indices,
                     self.storage,
                     self.storage.shape[1:],
@@ -53,13 +55,13 @@ class PyTorchTensorStorage(BaseTensorStorage):
                     pin_memory,
                     **kwargs,
                 )
+                torch.cuda.nvtx.range_pop()
+                return fetch_cpu_res
         else:
             # CUDA to CUDA or CPU
 
             # change code for nvtx
             torch.cuda.nvtx.range_push("fetch_cuda")
-            res = _fetch_cuda(indices, self.storage, device, **kwargs)
+            fetch_cuda_res = _fetch_cuda(indices, self.storage, device, **kwargs)
             torch.cuda.nvtx.range_pop()
-            return res
-
-            # return _fetch_cuda(indices, self.storage, device, **kwargs)
+            return fetch_cuda_res
