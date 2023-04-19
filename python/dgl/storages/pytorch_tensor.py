@@ -55,4 +55,11 @@ class PyTorchTensorStorage(BaseTensorStorage):
                 )
         else:
             # CUDA to CUDA or CPU
-            return _fetch_cuda(indices, self.storage, device, **kwargs)
+
+            # change code for nvtx
+            torch.cuda.nvtx.range_push("fetch_cuda")
+            res = _fetch_cuda(indices, self.storage, device, **kwargs)
+            torch.cuda.nvtx.range_pop()
+            return res
+
+            # return _fetch_cuda(indices, self.storage, device, **kwargs)
