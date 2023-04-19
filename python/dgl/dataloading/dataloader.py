@@ -413,9 +413,14 @@ def _prefetch(batch, dataloader, stream):
         feats = recursive_apply(feats, _await_or_return)
         feats = recursive_apply(feats, _record_stream, current_stream)
         # transfer input nodes/seed nodes/subgraphs
+        # input nodes = first layer src nodes
+        # seed nodes = last layer dst nodes
+        # subgraphs = MFGs{DGLBlock}
+        torch.cuda.nvtx.range_push("transfer subgraphs structure(MFGs) to device")
         batch = recursive_apply(
             batch, lambda x: x.to(dataloader.device, non_blocking=True)
         )
+        torch.cuda.nvtx.range_pop()
         batch = recursive_apply(batch, _record_stream, current_stream)
     stream_event = stream.record_event() if stream is not None else None
     return batch, feats, stream_event
