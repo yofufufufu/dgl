@@ -318,9 +318,11 @@ def _prefetch_update_feats(
                         "Found a LazyFeature with no ID specified, "
                         "and the graph does not have dgl.NID or dgl.EID columns"
                     )
+                torch.cuda.nvtx.range_push("_prefetch_update_feats: feature prefetch")
                 feats[tid, key] = get_storage_func(parent_key, type_).fetch(
                     column.id_ or default_id, device, pin_prefetcher
                 )
+                torch.cuda.nvtx.range_pop()
 
 
 # This class exists to avoid recursion into the feature dictionary returned by the
@@ -416,7 +418,7 @@ def _prefetch(batch, dataloader, stream):
         # input nodes = first layer src nodes
         # seed nodes = last layer dst nodes
         # subgraphs = MFGs{DGLBlock}
-        torch.cuda.nvtx.range_push("transfer subgraphs structure(MFGs) to device")
+        torch.cuda.nvtx.range_push("_prefetch lambda: transfer subgraphs structure(MFGs) to device")
         batch = recursive_apply(
             batch, lambda x: x.to(dataloader.device, non_blocking=True)
         )

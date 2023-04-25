@@ -9,6 +9,7 @@ from .base import dgl_warning, DGLError
 from .init import zero_initializer
 from .storages import TensorStorage
 from .utils import gather_pinned_tensor_rows, pin_memory_inplace
+import torch
 
 
 class _LazyIndex(object):
@@ -256,9 +257,11 @@ class Column(TensorStorage):
 
         # move data to the right device
         if self.device is not None:
+            torch.cuda.nvtx.range_push("Column.data: copy feature data")
             self.storage = F.copy_to(
                 self.storage, self.device[0], **self.device[1]
             )
+            torch.cuda.nvtx.range_pop()
             self.device = None
 
         # convert data to the right type

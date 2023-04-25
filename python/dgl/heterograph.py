@@ -10,6 +10,7 @@ from contextlib import contextmanager
 
 import networkx as nx
 import numpy as np
+import torch
 
 from . import backend as F, core, graph_index, heterograph_index, utils
 
@@ -5646,14 +5647,19 @@ class DGLGraph(object):
         ret = copy.copy(self)
 
         # 1. Copy graph structure
+        torch.cuda.nvtx.range_push("DGLGraph.to: Copy graph structure")
         ret._graph = self._graph.copy_to(utils.to_dgl_context(device))
+        torch.cuda.nvtx.range_pop()
 
         # 2. Copy features
+        # Actually just set column device attribute, no transfer
         # TODO(minjie): handle initializer
+        torch.cuda.nvtx.range_push("DGLGraph.to: Copy graph features(Actually just set column device attribute, no transfer)")
         new_nframes = []
         for nframe in self._node_frames:
             new_nframes.append(nframe.to(device, **kwargs))
         ret._node_frames = new_nframes
+        torch.cuda.nvtx.range_pop()
 
         new_eframes = []
         for eframe in self._edge_frames:

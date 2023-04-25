@@ -316,7 +316,7 @@ macro(dgl_config_cuda out_variable)
   list(APPEND CUDA_NVCC_FLAGS "-std=c++14")
 
   # add debug info
-  list(APPEND CUDA_NVCC_FLAGS "-g;-G;-O0;--source-in-ptx")
+  list(APPEND CUDA_NVCC_FLAGS "-g;-lineinfo;--source-in-ptx")
 
   message(STATUS "CUDA flags: ${CUDA_NVCC_FLAGS}")
 

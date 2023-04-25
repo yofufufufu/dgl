@@ -1,4 +1,5 @@
 """Neighbor sampling APIs"""
+import torch
 
 from .. import backend as F, ndarray as nd, utils
 from .._ffi.function import _init_api
@@ -446,6 +447,7 @@ def _sample_neighbors(
             else:
                 excluded_edges_all_t.append(nd.array([], ctx=ctx))
 
+    torch.cuda.nvtx.range_push("CAPI_DGLSampleNeighbors")
     subgidx = _CAPI_DGLSampleNeighbors(
         g._graph,
         nodes_all_types,
@@ -455,6 +457,7 @@ def _sample_neighbors(
         excluded_edges_all_t,
         replace,
     )
+    torch.cuda.nvtx.range_pop()
     induced_edges = subgidx.induced_edges
     ret = DGLGraph(subgidx.graph, g.ntypes, g.etypes)
 
