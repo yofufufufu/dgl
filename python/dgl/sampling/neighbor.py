@@ -457,6 +457,8 @@ def _sample_neighbors(
         excluded_edges_all_t,
         replace,
     )
+    # just for profile!
+    # torch.cuda.synchronize()
     torch.cuda.nvtx.range_pop()
     induced_edges = subgidx.induced_edges
     ret = DGLGraph(subgidx.graph, g.ntypes, g.etypes)
