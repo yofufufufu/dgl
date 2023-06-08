@@ -192,6 +192,17 @@ add_subdirectory("third_party/dmlc-core")
 list(APPEND DGL_LINKER_LIBS dmlc)
 set(GOOGLE_TEST 0) # Turn off dmlc-core test
 
+# custom sampler using stdgpu
+# Exclude the examples from the build
+set(STDGPU_BUILD_EXAMPLES OFF CACHE INTERNAL "")
+# Exclude the benchmarks from the build
+set(STDGPU_BUILD_BENCHMARKS OFF CACHE INTERNAL "")
+# Exclude the tests from the build
+set(STDGPU_BUILD_TESTS OFF CACHE INTERNAL "")
+add_subdirectory(third_party/stdgpu)
+list(APPEND DGL_LINKER_LIBS stdgpu::stdgpu)
+#target_link_libraries(dgl stdgpu::stdgpu)
+
 # Compile METIS
 if(NOT MSVC)
   set(GKLIB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/METIS/GKlib")
@@ -269,16 +280,6 @@ if(MSVC)
     TARGET dgl POST_BUILD COMMAND
     ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:dgl>" "$<TARGET_FILE_DIR:dgl>/..")
 endif(MSVC)
-
-# custom sampler using stdgpu
-# Exclude the examples from the build
-set(STDGPU_BUILD_EXAMPLES OFF CACHE INTERNAL "")
-# Exclude the benchmarks from the build
-set(STDGPU_BUILD_BENCHMARKS OFF CACHE INTERNAL "")
-# Exclude the tests from the build
-set(STDGPU_BUILD_TESTS OFF CACHE INTERNAL "")
-add_subdirectory(third_party/stdgpu)
-target_link_libraries(dgl stdgpu)
 
 # Tensor adapter libraries
 # Linking against LibTorch involves linking against a bunch of other libraries
