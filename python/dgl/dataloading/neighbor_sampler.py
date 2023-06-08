@@ -2,6 +2,26 @@
 from ..base import EID, NID
 from ..transforms import to_block
 from .base import BlockSampler
+from .base import Sampler
+
+
+class TaskParallelismNeighborSampler(Sampler):
+    """
+    Custom Neighbor Sampler using Task Parallelism
+    """
+
+    def __init__(self, fanouts):
+        super().__init__()
+        self.fanouts = fanouts
+
+    def sample(self, g, seed_nodes):
+        output_nodes = seed_nodes
+        blocks = []
+        frontiers = g.sample_neighbors_task_parallelism(seed_nodes, self.fanouts)
+        for frontier in frontiers:
+            blocks.append(to_block(frontier, seed_nodes))
+        input_nodes = []
+        return input_nodes, output_nodes, blocks
 
 
 class NeighborSampler(BlockSampler):

@@ -203,6 +203,33 @@ def sample_etype_neighbors(
 DGLGraph.sample_etype_neighbors = utils.alias_func(sample_etype_neighbors)
 
 
+def sample_neighbors_task_parallelism(g, nodes, fanouts,):
+    if not isinstance(nodes, dict):
+        if len(g.ntypes) > 1:
+            raise DGLError(
+                "Must specify node type when the graph is not homogeneous."
+            )
+        nodes = {g.ntypes[0]: nodes}
+    nodes = utils.prepare_tensor_dict(g, nodes, "nodes")
+    device = utils.context_of(nodes)
+    ctx = utils.to_dgl_context(device)
+    nodes_all_types = []
+    for ntype in g.ntypes:
+        if ntype in nodes:
+            nodes_all_types.append(F.to_dgl_nd(nodes[ntype]))
+        else:
+            nodes_all_types.append(nd.array([], ctx=ctx))
+
+    fanout_array = F.to_dgl_nd(F.tensor(fanouts, dtype=F.int64))
+
+    subgs = _CAPI_CustomSampleNeighborsTaskParallelism(g._graph, nodes_all_types, fanout_array,)
+    ret = DGLGraph(subgs.graph, g.ntypes, g.etypes)
+    return ret
+
+
+DGLGraph.sample_neighbors_task_parallelism = utils.alias_func(sample_neighbors_task_parallelism)
+
+
 def sample_neighbors(
     g,
     nodes,

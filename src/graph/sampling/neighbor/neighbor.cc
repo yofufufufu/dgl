@@ -546,6 +546,20 @@ DGL_REGISTER_GLOBAL("sampling.labor._CAPI_DGLSampleLabors")
       *rv = ret_val;
     });
 
+DGL_REGISTER_GLOBAL("sampling.neighbor._CAPI_CustomSampleNeighborsTaskParallelism")
+    .set_body([](DGLArgs args, DGLRetValue* rv){
+        HeteroGraphRef hg = args[0];
+        const auto& nodes = ListValueToVector<IdArray>(args[1]);
+        IdArray fanouts_array = args[2];
+        // multi-hop fanouts
+        const auto& fanouts = fanouts_array.ToVector<int64_t>();
+
+        std::shared_ptr<HeteroSubgraph> subg(new HeteroSubgraph);
+        // do something
+
+        *rv = HeteroSubgraphRef(subg);
+    });
+
 DGL_REGISTER_GLOBAL("sampling.neighbor._CAPI_DGLSampleNeighbors")
     .set_body([](DGLArgs args, DGLRetValue* rv) {
       HeteroGraphRef hg = args[0];
