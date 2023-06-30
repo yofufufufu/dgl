@@ -595,6 +595,13 @@ COOMatrix CSRRowWiseSampling(
   return ret;
 }
 
+std::vector<COOMatrix> CustomCSRRowWiseSamplingTaskParallelism(
+    CSRMatrix mat, IdArray rows, const std::vector<int64_t>& num_samples){
+  std::vector<COOMatrix> ret;
+  ret = impl::CustomCSRRowWiseSamplingUniformTaskParallelism(mat, rows, num_samples);
+  return ret;
+}
+
 COOMatrix CSRRowWisePerEtypeSampling(
     CSRMatrix mat, IdArray rows, const std::vector<int64_t>& eid2etype_offset,
     const std::vector<int64_t>& num_samples,

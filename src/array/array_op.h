@@ -194,6 +194,9 @@ template <DGLDeviceType XPU, typename IdType>
 COOMatrix CSRRowWiseSamplingUniform(
     CSRMatrix mat, IdArray rows, int64_t num_samples, bool replace);
 
+std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
+    CSRMatrix mat, IdArray rows, const std::vector<int64_t>& num_picks);
+
 template <DGLDeviceType XPU, typename IdType>
 COOMatrix CSRRowWisePerEtypeSamplingUniform(
     CSRMatrix mat, IdArray rows, const std::vector<int64_t>& eid2etype_offset,

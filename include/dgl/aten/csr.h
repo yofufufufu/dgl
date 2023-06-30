@@ -534,6 +534,9 @@ COOMatrix CSRRowWiseSampling(
     CSRMatrix mat, IdArray rows, int64_t num_samples,
     NDArray prob_or_mask = NDArray(), bool replace = true);
 
+std::vector<COOMatrix> CustomCSRRowWiseSamplingTaskParallelism(
+    CSRMatrix mat, IdArray rows, const std::vector<int64_t>& num_samples);
+
 /**
  * @brief Randomly select a fixed number of non-zero entries for each edge type
  *        along each given row independently.

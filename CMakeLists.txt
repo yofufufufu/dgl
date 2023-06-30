@@ -88,9 +88,13 @@ if(MSVC)
 else(MSVC)
   include(CheckCXXCompilerFlag)
   # tensorpipe's dependencies require C++14
-  check_cxx_compiler_flag("-std=c++14"    SUPPORT_CXX14)
+  # stdgpu need c++17
+#  check_cxx_compiler_flag("-std=c++14"    SUPPORT_CXX14)
+  check_cxx_compiler_flag("-std=c++17"    SUPPORT_CXX17)
   set(CMAKE_C_FLAGS "-O2 -Wall -fPIC ${CMAKE_C_FLAGS}")
-  set(CMAKE_CXX_FLAGS "-O2 -Wall -fPIC -std=c++14 ${CMAKE_CXX_FLAGS}")
+  # change to c++17
+#  set(CMAKE_CXX_FLAGS "-O2 -Wall -fPIC -std=c++14 ${CMAKE_CXX_FLAGS}")
+  set(CMAKE_CXX_FLAGS "-O2 -Wall -fPIC -std=c++17 ${CMAKE_CXX_FLAGS}")
   if(NOT APPLE)
     set(CMAKE_SHARED_LINKER_FLAGS "-Wl,--warn-common ${CMAKE_SHARED_LINKER_FLAGS}")
   endif(NOT APPLE)
@@ -170,7 +174,9 @@ else(USE_CUDA)
   add_library(dgl SHARED ${DGL_SRC})
 endif(USE_CUDA)
 
-set_property(TARGET dgl PROPERTY CXX_STANDARD 14)
+# change to c++17
+#set_property(TARGET dgl PROPERTY CXX_STANDARD 14)
+set_property(TARGET dgl PROPERTY CXX_STANDARD 17)
 
 # include directories
 target_include_directories(dgl PRIVATE "include")
@@ -200,8 +206,10 @@ set(STDGPU_BUILD_BENCHMARKS OFF CACHE INTERNAL "")
 # Exclude the tests from the build
 set(STDGPU_BUILD_TESTS OFF CACHE INTERNAL "")
 add_subdirectory(third_party/stdgpu)
-list(APPEND DGL_LINKER_LIBS stdgpu::stdgpu)
-#target_link_libraries(dgl stdgpu::stdgpu)
+#set(CMAKE_PREFIX_PATH  ${CMAKE_PREFIX_PATH} "/home/tang22/mydgl/dgl/third_party/stdgpu/bin/lib/cmake/stdgpu/")
+#find_package(stdgpu 1.3.0 REQUIRED)
+#list(APPEND DGL_LINKER_LIBS stdgpu::stdgpu)
+target_link_libraries(dgl stdgpu::stdgpu)
 
 # Compile METIS
 if(NOT MSVC)

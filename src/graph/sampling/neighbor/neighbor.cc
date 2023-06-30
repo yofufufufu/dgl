@@ -182,6 +182,34 @@ std::pair<HeteroSubgraph, std::vector<FloatArray>> SampleLabors(
   return std::make_pair(ret, std::move(subimportances));
 }
 
+std::vector<HeteroSubgraph> CustomSampleNeighborsTaskParallelism(
+        const HeteroGraphPtr hg, const std::vector<IdArray>& nodes,
+        const std::vector<int64_t>& fanouts){
+    const auto hops = fanouts.size();
+    // 虽然我面向的图edge type只有一个，但是为了能照抄代码，即使用CreateHeteroGraph方法，还是用vector
+    std::vector<HeteroGraphPtr> subrels(hg->NumEdgeTypes());
+    // 确定只有一种edge type, 改为针对多个hop
+//    std::vector<IdArray> induced_edges(hg->NumEdgeTypes());
+//    std::vector<IdArray> induced_edges(hops);
+    // multi-hops sample results
+    auto sampled_coo = CustomCSRRowWiseSamplingTaskParallelism(hg->GetCSCMatrix(0), nodes[0], fanouts);
+    std::vector<HeteroSubgraph> ret(hops);
+    for (int i = 0; i < hops; i++)
+    {
+        auto transposed_coo_res = aten::COOTranspose(sampled_coo[i]);
+        subrels[0] = UnitGraph::CreateFromCOO(
+                hg->GetRelationGraph(0)->NumVertexTypes(), transposed_coo_res.num_rows,
+                transposed_coo_res.num_cols, transposed_coo_res.row, transposed_coo_res.col);
+//        induced_edges[i] = transposed_coo_res.data;
+        ret[i].graph =
+                CreateHeteroGraph(hg->meta_graph(), subrels, hg->NumVerticesPerType());
+        ret[i].induced_vertices.resize(hg->NumVertexTypes());
+        // better to use std::move
+        ret[i].induced_edges = std::move(std::vector{transposed_coo_res.data});
+    }
+    return ret;
+}
+
 HeteroSubgraph SampleNeighbors(
     const HeteroGraphPtr hg, const std::vector<IdArray>& nodes,
     const std::vector<int64_t>& fanouts, EdgeDir dir,
@@ -553,11 +581,22 @@ DGL_REGISTER_GLOBAL("sampling.neighbor._CAPI_CustomSampleNeighborsTaskParallelis
         IdArray fanouts_array = args[2];
         // multi-hop fanouts
         const auto& fanouts = fanouts_array.ToVector<int64_t>();
+        const auto hops = fanouts.size();
 
-        std::shared_ptr<HeteroSubgraph> subg(new HeteroSubgraph);
-        // do something
-
-        *rv = HeteroSubgraphRef(subg);
+        std::vector<std::shared_ptr<HeteroSubgraph>> subgs(hops);
+        std::vector<HeteroSubgraph> custom_sample_res =
+            sampling::CustomSampleNeighborsTaskParallelism(hg.sptr(), nodes, fanouts);
+        for (size_t i = 0; i < hops; i++) {
+            std::shared_ptr<HeteroSubgraph> subg_ptr(new HeteroSubgraph(custom_sample_res[i]));
+            subgs[i] = subg_ptr;
+        }
+        List<HeteroSubgraphRef> ret_list;
+        for (size_t i = 0; i < subgs.size(); i++) {
+            ret_list.push_back(HeteroSubgraphRef(subgs[i]));
+        }
+        // return a DGL list of (multi hop) subgraphs
+        // learned from https://github.com/dmlc/dgl/blob/master/src/graph/transform/partition_hetero.cc#L257-L273
+        *rv = ret_list;
     });
 
 DGL_REGISTER_GLOBAL("sampling.neighbor._CAPI_DGLSampleNeighbors")

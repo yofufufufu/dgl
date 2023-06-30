@@ -8,7 +8,9 @@ endif()
 ###### Borrowed from MSHADOW project
 
 include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-std=c++14"   SUPPORT_CXX14)
+# change to c++17
+#check_cxx_compiler_flag("-std=c++14"   SUPPORT_CXX14)
+check_cxx_compiler_flag("-std=c++17"   SUPPORT_CXX17)
 
 #set(dgl_known_gpu_archs "35" "50" "60" "70")
 #set(dgl_cuda_arch_ptx "70")
@@ -220,7 +222,9 @@ macro(dgl_cuda_compile objlist_variable)
 
   endforeach()
   if(UNIX OR APPLE)
-    list(APPEND CUDA_NVCC_FLAGS -Xcompiler -fPIC --std=c++14)
+    # change to c++17
+#    list(APPEND CUDA_NVCC_FLAGS -Xcompiler -fPIC --std=c++14)
+    list(APPEND CUDA_NVCC_FLAGS -Xcompiler -fPIC --std=c++17)
   endif()
 
   if(APPLE)
@@ -311,9 +315,12 @@ macro(dgl_config_cuda out_variable)
 
   # 3. CUDA 11 requires c++14 by default
   include(CheckCXXCompilerFlag)
-  check_cxx_compiler_flag("-std=c++14"    SUPPORT_CXX14)
+  # change to c++17
+#  check_cxx_compiler_flag("-std=c++14"    SUPPORT_CXX14)
+  check_cxx_compiler_flag("-std=c++17"    SUPPORT_CXX17)
   string(REPLACE "-std=c++11" "" CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS}")
-  list(APPEND CUDA_NVCC_FLAGS "-std=c++14")
+#  list(APPEND CUDA_NVCC_FLAGS "-std=c++14")
+  list(APPEND CUDA_NVCC_FLAGS "-std=c++17")
 
   # add debug info
   list(APPEND CUDA_NVCC_FLAGS "-g;-lineinfo;--source-in-ptx")

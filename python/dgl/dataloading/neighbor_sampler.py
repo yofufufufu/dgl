@@ -19,8 +19,10 @@ class TaskParallelismNeighborSampler(Sampler):
         blocks = []
         frontiers = g.sample_neighbors_task_parallelism(seed_nodes, self.fanouts)
         for frontier in frontiers:
-            blocks.append(to_block(frontier, seed_nodes))
-        input_nodes = []
+            # 可以不用手动添加dst nodes, to_block方法会自动尝试找到(都已经有子图了，子图的dst nodes当然能找到)
+            # 注意block的顺序，到底是append还是insert(0)?
+            blocks.insert(0, to_block(frontier))
+        input_nodes = blocks[0].srcdata[NID]
         return input_nodes, output_nodes, blocks
 
 

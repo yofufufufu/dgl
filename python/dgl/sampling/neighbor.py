@@ -10,6 +10,7 @@ from .utils import EidExcluder
 __all__ = [
     "sample_etype_neighbors",
     "sample_neighbors",
+    "sample_neighbors_task_parallelism",
     "sample_neighbors_biased",
     "select_topk",
 ]
@@ -223,8 +224,17 @@ def sample_neighbors_task_parallelism(g, nodes, fanouts,):
     fanout_array = F.to_dgl_nd(F.tensor(fanouts, dtype=F.int64))
 
     subgs = _CAPI_CustomSampleNeighborsTaskParallelism(g._graph, nodes_all_types, fanout_array,)
-    ret = DGLGraph(subgs.graph, g.ntypes, g.etypes)
-    return ret
+    retList = []
+    for subg in subgs:
+        induced_edges = subg.induced_edges
+        ret = DGLGraph(subg.graph, g.ntypes, g.etypes)
+        # copy ndata, edata
+        node_frames = utils.extract_node_subframes(g, device)
+        utils.set_new_frames(ret, node_frames=node_frames)
+        edge_frames = utils.extract_edge_subframes(g, induced_edges)
+        utils.set_new_frames(ret, edge_frames=edge_frames)
+        retList.append(ret)
+    return retList
 
 
 DGLGraph.sample_neighbors_task_parallelism = utils.alias_func(sample_neighbors_task_parallelism)
