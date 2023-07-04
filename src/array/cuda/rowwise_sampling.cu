@@ -176,12 +176,18 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     // num_pick cannot be larger than 128
     // any better solution?
     __shared__ int64_t permList[128];
+    extern __shared__ int64_t local_res_num[];
+
+    // init local_res_num
+    if (threadIdx.x < hops){
+        local_res_num[threadIdx.x] = 0;
+    }
 
     curandStatePhilox4_32_10_t rng;
     curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
 
     while (true){
-        if (threadIdx.x==0){
+        if (threadIdx.x == 0){
             auto pop_res = task_queue.pop();
             if (!pop_res.second)
                 sharedRes[0] = pop_res.second;
@@ -213,7 +219,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE){
                 const int64_t in_idx = in_row_start + idx;
                 result.push_back({hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx});
-                AtomicAdd<int64_t>(&res_num[hop_num - 1], 1);
+                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], 1);
                 // last hop don't need to push task
                 if (hop_num < hops){
                     auto dup_res = set.insert({hop_num + 1, in_index[in_idx]});
@@ -243,7 +249,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                 // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
                 const int64_t perm_idx = permList[idx] + in_row_start;
                 result.push_back({hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx});
-                AtomicAdd<int64_t>(&res_num[hop_num - 1], 1);
+                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], 1);
                 // last hop don't need to push task
                 if (hop_num < hops){
                     auto dup_res = set.insert({hop_num + 1, in_index[perm_idx]});
@@ -259,6 +265,11 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             if (dup_res.second)
                 task_queue.push({hop_num + 1, row});
         }
+    }
+
+    // write local_res_num to global
+    if (threadIdx.x < hops){
+        AtomicAdd<int64_t>(&res_num[threadIdx.x], local_res_num[threadIdx.x]);
     }
 }
 
@@ -600,7 +611,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     // wait for copying `d_num_picks` to finish
     CUDA_CALL(cudaEventSynchronize(copyEvent));
     CUDA_CALL(cudaEventDestroy(copyEvent));
-    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
+    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, hops*sizeof(int64_t), stream,
                      random_seed, d_num_picks, d_res_num, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
                      task_queue, set, res_vector);
     assert(task_queue.empty());
