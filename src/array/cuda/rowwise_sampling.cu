@@ -593,7 +593,10 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const dim3 block(BLOCK_SIZE);
     // should gird num be max?
 //    const dim3 grid(num_rows);
-    const dim3 grid(128);
+//    const dim3 grid(128);
+    // best performance:arxiv, [25,10]
+    const dim3 grid(64);
+//    const dim3 grid(32);
     // wait for copying `d_num_picks` to finish
     CUDA_CALL(cudaEventSynchronize(copyEvent));
     CUDA_CALL(cudaEventDestroy(copyEvent));
