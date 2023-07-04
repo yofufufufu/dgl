@@ -197,6 +197,11 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         __syncthreads();
         if (!sharedRes[0])
             break;
+        // result.size() > num_rows * 5 just for test, should have a better check policy
+//        if (!sharedRes[0] && result.size() > num_rows * 5)
+//            break;
+//        else if (!sharedRes[0])
+//            continue;
         // run task, same block threads have same task(hop_num, row_num)
         int hop_num = blockTask[0];
         const int64_t row = blockTask[1];
@@ -588,8 +593,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const dim3 block(BLOCK_SIZE);
     // should gird num be max?
 //    const dim3 grid(num_rows);
-    const dim3 grid(cudaDevAttrMaxGridDimX);
-//    const dim3 grid(102400);
+    const dim3 grid(128);
     // wait for copying `d_num_picks` to finish
     CUDA_CALL(cudaEventSynchronize(copyEvent));
     CUDA_CALL(cudaEventDestroy(copyEvent));
