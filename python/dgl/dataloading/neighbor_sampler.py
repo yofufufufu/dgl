@@ -1,4 +1,6 @@
 """Data loading components for neighbor sampling"""
+import torch
+
 from ..base import EID, NID
 from ..transforms import to_block
 from .base import BlockSampler
@@ -12,13 +14,14 @@ class TaskParallelismNeighborSampler(Sampler):
 
     def __init__(self, fanouts):
         super().__init__()
-        self.fanouts = fanouts
+        self.fanouts = torch.flip(fanouts, [0,])
 
     def sample(self, g, seed_nodes):
         output_nodes = seed_nodes
         blocks = []
         # DGL 的fanout是per layer的，所以这里要reverse一下
-        frontiers = g.sample_neighbors_task_parallelism(seed_nodes, list(reversed(self.fanouts)))
+        # frontiers = g.sample_neighbors_task_parallelism(seed_nodes, list(reversed(self.fanouts)))
+        frontiers = g.sample_neighbors_task_parallelism(seed_nodes, self.fanouts)
         for frontier in frontiers:
             # 注意block的顺序，到底是append还是insert(0)?
             eid = frontier.edata[EID]

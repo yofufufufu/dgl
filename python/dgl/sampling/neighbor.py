@@ -205,6 +205,8 @@ DGLGraph.sample_etype_neighbors = utils.alias_func(sample_etype_neighbors)
 
 
 def sample_neighbors_task_parallelism(g, nodes, fanouts,):
+    # fanout_array = F.to_dgl_nd(F.copy_to(F.tensor(fanouts, dtype=F.int64), F.context(g)))
+    fanout_array = F.to_dgl_nd(fanouts)
     if not isinstance(nodes, dict):
         if len(g.ntypes) > 1:
             raise DGLError(
@@ -220,8 +222,6 @@ def sample_neighbors_task_parallelism(g, nodes, fanouts,):
             nodes_all_types.append(F.to_dgl_nd(nodes[ntype]))
         else:
             nodes_all_types.append(nd.array([], ctx=ctx))
-
-    fanout_array = F.to_dgl_nd(F.tensor(fanouts, dtype=F.int64))
 
     subgs = _CAPI_CustomSampleNeighborsTaskParallelism(g._graph, nodes_all_types, fanout_array,)
     retList = []

@@ -184,8 +184,8 @@ std::pair<HeteroSubgraph, std::vector<FloatArray>> SampleLabors(
 
 std::vector<HeteroSubgraph> CustomSampleNeighborsTaskParallelism(
         const HeteroGraphPtr hg, const std::vector<IdArray>& nodes,
-        const std::vector<int64_t>& fanouts){
-    const auto hops = fanouts.size();
+        const IdArray& fanouts){
+    const auto hops = fanouts->shape[0];
     // 虽然我面向的图edge type只有一个，但是为了能照抄代码，即使用CreateHeteroGraph方法，还是用vector
     std::vector<HeteroGraphPtr> subrels(hg->NumEdgeTypes());
     // 确定只有一种edge type, 改为针对多个hop
@@ -582,12 +582,13 @@ DGL_REGISTER_GLOBAL("sampling.neighbor._CAPI_CustomSampleNeighborsTaskParallelis
         const auto& nodes = ListValueToVector<IdArray>(args[1]);
         IdArray fanouts_array = args[2];
         // multi-hop fanouts
-        const auto& fanouts = fanouts_array.ToVector<int64_t>();
-        const auto hops = fanouts.size();
+//        const auto& fanouts = fanouts_array.ToVector<int64_t>();
+//        const auto hops = fanouts.size();
+        const auto hops = fanouts_array->shape[0];
 
         std::vector<std::shared_ptr<HeteroSubgraph>> subgs(hops);
         std::vector<HeteroSubgraph> custom_sample_res =
-            sampling::CustomSampleNeighborsTaskParallelism(hg.sptr(), nodes, fanouts);
+            sampling::CustomSampleNeighborsTaskParallelism(hg.sptr(), nodes, fanouts_array);
         for (size_t i = 0; i < hops; i++) {
             std::shared_ptr<HeteroSubgraph> subg_ptr(new HeteroSubgraph(custom_sample_res[i]));
             subgs[i] = subg_ptr;
