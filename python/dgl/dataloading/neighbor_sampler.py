@@ -17,11 +17,16 @@ class TaskParallelismNeighborSampler(Sampler):
     def sample(self, g, seed_nodes):
         output_nodes = seed_nodes
         blocks = []
-        frontiers = g.sample_neighbors_task_parallelism(seed_nodes, self.fanouts)
+        # DGL 的fanout是per layer的，所以这里要reverse一下
+        frontiers = g.sample_neighbors_task_parallelism(seed_nodes, list(reversed(self.fanouts)))
         for frontier in frontiers:
-            # 可以不用手动添加dst nodes, to_block方法会自动尝试找到(都已经有子图了，子图的dst nodes当然能找到)
             # 注意block的顺序，到底是append还是insert(0)?
-            blocks.insert(0, to_block(frontier))
+            eid = frontier.edata[EID]
+            # 不手动添加dst nodes不收敛(改了NeighborSampler跟我的收敛一样loss在3.几下不去)
+            block = to_block(frontier, seed_nodes)
+            block.edata[EID] = eid
+            blocks.insert(0, block)
+            seed_nodes = block.srcdata[NID]
         input_nodes = blocks[0].srcdata[NID]
         return input_nodes, output_nodes, blocks
 
@@ -175,6 +180,7 @@ class NeighborSampler(BlockSampler):
             )
             eid = frontier.edata[EID]
             block = to_block(frontier, seed_nodes)
+            # block = to_block(frontier)
             block.edata[EID] = eid
             seed_nodes = block.srcdata[NID]
             blocks.insert(0, block)

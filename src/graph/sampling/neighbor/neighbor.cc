@@ -196,6 +196,8 @@ std::vector<HeteroSubgraph> CustomSampleNeighborsTaskParallelism(
     std::vector<HeteroSubgraph> ret(hops);
     for (int i = 0; i < hops; i++)
     {
+        // need sort?
+//        sampled_coo[i] = aten::COOSort(sampled_coo[i], true);
         auto transposed_coo_res = aten::COOTranspose(sampled_coo[i]);
         subrels[0] = UnitGraph::CreateFromCOO(
                 hg->GetRelationGraph(0)->NumVertexTypes(), transposed_coo_res.num_rows,

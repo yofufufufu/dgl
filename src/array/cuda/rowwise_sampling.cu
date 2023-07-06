@@ -111,7 +111,9 @@ struct PairHash {
         std::size_t y = pair.second;
 
         // Cantor pairing function
+        // 数太大会溢出，考虑用别的hash函数
         std::size_t hashValue = ((x + y) * (x + y + 1)) / 2 + y;
+//        std::printf("x: %d, y: %ld, hash: %ld\n", x, y, hashValue);
         return hashValue;
     }
 };
@@ -178,13 +180,23 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __shared__ int64_t permList[128];
     extern __shared__ int64_t local_res_num[];
 
+//    const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
+//    if (tIdx < num_rows) {
+//        task_queue.push({1, in_rows[tIdx]});
+//    }
+//    __syncthreads();
+
     // init local_res_num
     if (threadIdx.x < hops){
         local_res_num[threadIdx.x] = 0;
     }
+//    __syncthreads();
 
     curandStatePhilox4_32_10_t rng;
+    // different block has different seed
+    // different thread in block has different (sub)sequence
     curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
+//    curand_init(rand_seed, 0, 0, &rng);
 
     while (true){
         if (threadIdx.x == 0){
@@ -201,6 +213,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             }
         }
         __syncthreads();
+//        if (!sharedRes[0] && task_queue.empty())
         if (!sharedRes[0])
             break;
         // result.size() > num_rows * 5 just for test, should have a better check policy
@@ -209,27 +222,39 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 //        else if (!sharedRes[0])
 //            continue;
         // run task, same block threads have same task(hop_num, row_num)
-        int hop_num = blockTask[0];
+        const int hop_num = blockTask[0];
         const int64_t row = blockTask[1];
         const int64_t in_row_start = in_ptr[row];
         const int64_t deg = in_ptr[row + 1] - in_row_start;
 
         if (deg <= num_picks[hop_num - 1]) {
+//            if (threadIdx.x == 0)
+//                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], deg);
+//            std::printf("row: %ld, deg: %ld, num_picks: %ld\n", row, deg, num_picks[hop_num - 1]);
             // just copy row when there is not enough nodes to sample
             for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE){
                 const int64_t in_idx = in_row_start + idx;
                 result.push_back({hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx});
-                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], 1);
+//                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
+//                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], 1);
+//                AtomicAdd<int64_t>(&res_num[hop_num - 1], 1);
                 // last hop don't need to push task
                 if (hop_num < hops){
                     auto dup_res = set.insert({hop_num + 1, in_index[in_idx]});
                     // if insert successfully, means no duplication, push task
-                    if (dup_res.second)
+                    if (dup_res.second){
+//                        std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, in_index[in_idx]);
                         task_queue.push({hop_num + 1, in_index[in_idx]});
+//                        std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, in_index[in_idx]);
+                    }
+//                    else
+//                        std::printf("insert hop_num: %d, row: %ld false\n", hop_num + 1, in_index[in_idx]);
                 }
             }
         }
         else {
+//            if (threadIdx.x == 0)
+//                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], num_picks[hop_num - 1]);
             // generate permutation list via reservoir algorithm
             // reservoir init
             for (int idx = threadIdx.x; idx < num_picks[hop_num - 1]; idx += BLOCK_SIZE) {
@@ -240,6 +265,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             for (int idx = num_picks[hop_num - 1] + threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
                 const int num = curand(&rng) % (idx + 1);
                 if (num < num_picks[hop_num - 1]) {
+                    // use shared memory, faster than DGL?
                     AtomicMax(permList + num, idx);
                 }
             }
@@ -249,23 +275,42 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                 // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
                 const int64_t perm_idx = permList[idx] + in_row_start;
                 result.push_back({hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx});
-                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], 1);
+//                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
+//                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], 1);
+//                AtomicAdd<int64_t>(&res_num[hop_num - 1], 1);
                 // last hop don't need to push task
                 if (hop_num < hops){
                     auto dup_res = set.insert({hop_num + 1, in_index[perm_idx]});
                     // if insert successfully, means no duplication, push task
-                    if (dup_res.second)
+                    if (dup_res.second){
+//                        std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, in_index[perm_idx]);
                         task_queue.push({hop_num + 1, in_index[perm_idx]});
+//                        std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, in_index[perm_idx]);
+                    }
+//                    else
+//                        std::printf("insert hop_num: %d, row: %ld false\n", hop_num + 1, in_index[perm_idx]);
                 }
             }
         }
-        // push self
-        if (hop_num < hops){
-            auto dup_res = set.insert({hop_num + 1, row});
-            if (dup_res.second)
-                task_queue.push({hop_num + 1, row});
+        // update local_res_num and push self
+        if (threadIdx.x == 0){
+//            AtomicAdd<int64_t>(&local_res_num[hop_num - 1],
+//                               deg <= num_picks[hop_num - 1] ? deg : num_picks[hop_num - 1]);
+            local_res_num[hop_num - 1] += deg <= num_picks[hop_num - 1] ? deg : num_picks[hop_num - 1];
+            if (hop_num < hops){
+                auto dup_res = set.insert({hop_num + 1, row});
+                if (dup_res.second){
+//                std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, row);
+                    task_queue.push({hop_num + 1, row});
+//                std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, row);
+                }
+//            else
+//                std::printf("insert hop_num: %d, row: %ld false\n", hop_num + 1, row);
+            }
         }
+//        __syncthreads();
     }
+    __syncthreads();
 
     // write local_res_num to global
     if (threadIdx.x < hops){
@@ -307,6 +352,7 @@ __global__ void _CSRRowWiseSampleUniformKernel(
 
   curandStatePhilox4_32_10_t rng;
   curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
+//    curand_init(rand_seed, 0, 0, &rng);
 
   while (out_row < last_row) {
     const int64_t row = in_rows[out_row];
@@ -478,7 +524,9 @@ COOMatrix _CSRRowWiseSamplingUniform(
       DGLContext{kDGLCPU, 0}, mat.indptr->dtype);
   CUDA_CALL(cudaEventRecord(copyEvent, stream));
 
-  const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
+//  const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
+  // fix only for reproduce!
+  const uint64_t random_seed = 1234;
 
   // select edges
   // the number of rows each thread block will cover
@@ -599,21 +647,28 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
                           ? static_cast<int64_t*>(GetDevicePointer(mat.data))
                           : nullptr;
 
-    const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
+//    const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
+    // fix only for reproduce!
+    const uint64_t random_seed = 1234;
 
     const dim3 block(BLOCK_SIZE);
+//    const dim3 block(32);
     // should gird num be max?
-//    const dim3 grid(num_rows);
-//    const dim3 grid(128);
     // best performance:arxiv, [25,10]
-    const dim3 grid(64);
-//    const dim3 grid(32);
+    const dim3 grid(num_rows);
+//    const dim3 grid(256);
+//    const dim3 grid(128);
+//    const dim3 grid(64);
+//    const dim3 grid(1);
     // wait for copying `d_num_picks` to finish
     CUDA_CALL(cudaEventSynchronize(copyEvent));
     CUDA_CALL(cudaEventDestroy(copyEvent));
-    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, hops*sizeof(int64_t), stream,
+    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, hops * sizeof(int64_t), stream,
                      random_seed, d_num_picks, d_res_num, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
                      task_queue, set, res_vector);
+//    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
+//                     random_seed, d_num_picks, d_res_num, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
+//                     task_queue, set, res_vector);
     assert(task_queue.empty());
 //    std::printf("cuda kernel finished\n");
 
@@ -636,7 +691,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     auto range_vec = res_vector.device_range();
     std::vector<COOMatrix> ret_coo(hops);
 //    cudaPointerAttributes attributes;
+//    std::printf("result vector size: %ld\n", res_vector.size());
     for(int i = 0; i < hops; i++) {
+//        std::printf("res_num[%d]: %ld\n", i, res_num[i]);
         picked_rows[i] = NewIdArray(res_num[i], ctx, sizeof(int64_t) * 8);
         picked_cols[i] = NewIdArray(res_num[i], ctx, sizeof(int64_t) * 8);
         picked_indices[i] = NewIdArray(res_num[i], ctx, sizeof(int64_t) * 8);
