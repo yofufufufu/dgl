@@ -10,6 +10,7 @@
 
 #include <stdgpu/unordered_set.cuh>
 #include <stdgpu/queue.cuh>
+#include <stdgpu/deque.cuh>
 #include <stdgpu/vector.cuh>
 
 #include <numeric>
@@ -157,6 +158,7 @@ struct HopTrans : public thrust::unary_function<selectedEdgeInfo, int> {
 };
 
 
+// should try to push the node with more edges first
 __global__ void queue_init(
         stdgpu::queue<thrust::pair<int, int64_t>> queue, const int64_t* const in_rows, const int64_t num_rows){
     const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -180,6 +182,8 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __shared__ int64_t permList[128];
     extern __shared__ int64_t local_res_num[];
 
+    // do not use separate init kernel maybe faster? the result seems correct although only block level sync
+    // not correct! convergence will be changed(accuracy~0.6, correct accuracy~0.7)
 //    const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
 //    if (tIdx < num_rows) {
 //        task_queue.push({1, in_rows[tIdx]});
