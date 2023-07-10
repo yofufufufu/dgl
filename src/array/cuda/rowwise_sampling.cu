@@ -316,7 +316,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __syncthreads();
 
     // write local_res_num to global
-    if (threadIdx.x < hops){
+    if (threadIdx.x < hops - 1){
         AtomicAdd<int64_t>(&res_num[threadIdx.x], local_res_num[threadIdx.x]);
     }
 }
