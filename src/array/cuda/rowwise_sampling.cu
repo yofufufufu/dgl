@@ -717,28 +717,48 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //        }
         thrust::copy_if(
                 thrust::device,
-                thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
-                thrust::make_transform_iterator(range_vec.end(), RowTrans()),
+                thrust::make_zip_iterator(thrust::make_tuple(
+                        thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
+                        thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
+                        thrust::make_transform_iterator(range_vec.begin(), DataTrans())
+                        )),
+                thrust::make_zip_iterator(thrust::make_tuple(
+                        thrust::make_transform_iterator(range_vec.end(), RowTrans()),
+                        thrust::make_transform_iterator(range_vec.end(), ColTrans()),
+                        thrust::make_transform_iterator(range_vec.end(), DataTrans())
+                )),
                 thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
-                out_rows,
+                thrust::make_zip_iterator(thrust::make_tuple(
+                        out_rows,
+                        out_cols,
+                        out_idx
+                )),
                 CheckHopNum(i + 1)
                 );
-        thrust::copy_if(
-                thrust::device,
-                thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
-                thrust::make_transform_iterator(range_vec.end(), ColTrans()),
-                thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
-                out_cols,
-                CheckHopNum(i + 1)
-        );
-        thrust::copy_if(
-                thrust::device,
-                thrust::make_transform_iterator(range_vec.begin(), DataTrans()),
-                thrust::make_transform_iterator(range_vec.end(), DataTrans()),
-                thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
-                out_idx,
-                CheckHopNum(i + 1)
-        );
+//        thrust::copy_if(
+//                thrust::device,
+//                thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
+//                thrust::make_transform_iterator(range_vec.end(), RowTrans()),
+//                thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
+//                out_rows,
+//                CheckHopNum(i + 1)
+//                );
+//        thrust::copy_if(
+//                thrust::device,
+//                thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
+//                thrust::make_transform_iterator(range_vec.end(), ColTrans()),
+//                thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
+//                out_cols,
+//                CheckHopNum(i + 1)
+//        );
+//        thrust::copy_if(
+//                thrust::device,
+//                thrust::make_transform_iterator(range_vec.begin(), DataTrans()),
+//                thrust::make_transform_iterator(range_vec.end(), DataTrans()),
+//                thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
+//                out_idx,
+//                CheckHopNum(i + 1)
+//        );
         // inplace
 //        thrust::transform(out_rows, out_rows + res_num[i], out_rows, RowTrans());
 //        thrust::transform(out_cols, out_rows + res_num[i], out_cols, ColTrans());
