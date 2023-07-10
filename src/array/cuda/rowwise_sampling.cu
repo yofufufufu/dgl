@@ -168,8 +168,7 @@ __global__ void queue_init(
 }
 
 __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
-        const uint64_t rand_seed, const int64_t * num_picks, int64_t * res_num,
-        const int64_t * const in_rows, const int64_t num_rows, const int hops,
+        const uint64_t rand_seed, const int64_t * num_picks, const int64_t * const in_rows, const int64_t num_rows, const int hops,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
         stdgpu::queue<thrust::pair<int, int64_t>> task_queue,
         stdgpu::unordered_set<thrust::pair<int, int64_t>, PairHash> set,
@@ -180,7 +179,6 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     // num_pick cannot be larger than 128
     // any better solution?
     __shared__ int64_t permList[128];
-    extern __shared__ int64_t local_res_num[];
 
     // do not use separate init kernel maybe faster? the result seems correct although only block level sync
     // not correct! convergence will be changed(accuracy~0.6, correct accuracy~0.7)
@@ -188,12 +186,6 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 //    if (tIdx < num_rows) {
 //        task_queue.push({1, in_rows[tIdx]});
 //    }
-//    __syncthreads();
-
-    // init local_res_num
-    if (threadIdx.x < hops - 1) {
-        local_res_num[threadIdx.x] = 0;
-    }
 //    __syncthreads();
 
     curandStatePhilox4_32_10_t rng;
@@ -232,16 +224,12 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         const int64_t deg = in_ptr[row + 1] - in_row_start;
 
         if (deg <= num_picks[hop_num - 1]) {
-//            if (threadIdx.x == 0)
-//                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], deg);
 //            std::printf("row: %ld, deg: %ld, num_picks: %ld\n", row, deg, num_picks[hop_num - 1]);
             // just copy row when there is not enough nodes to sample
             for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE){
                 const int64_t in_idx = in_row_start + idx;
                 result.push_back({hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx});
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
-//                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], 1);
-//                AtomicAdd<int64_t>(&res_num[hop_num - 1], 1);
                 // last hop don't need to push task
                 if (hop_num < hops){
                     auto dup_res = set.insert({hop_num + 1, in_index[in_idx]});
@@ -257,8 +245,6 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             }
         }
         else {
-//            if (threadIdx.x == 0)
-//                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], num_picks[hop_num - 1]);
             // generate permutation list via reservoir algorithm
             // reservoir init
             for (int idx = threadIdx.x; idx < num_picks[hop_num - 1]; idx += BLOCK_SIZE) {
@@ -280,8 +266,6 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                 const int64_t perm_idx = permList[idx] + in_row_start;
                 result.push_back({hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx});
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
-//                AtomicAdd<int64_t>(&local_res_num[hop_num - 1], 1);
-//                AtomicAdd<int64_t>(&res_num[hop_num - 1], 1);
                 // last hop don't need to push task
                 if (hop_num < hops){
                     auto dup_res = set.insert({hop_num + 1, in_index[perm_idx]});
@@ -296,12 +280,8 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                 }
             }
         }
-        // update local_res_num and push self
-        // we can get res_num[hop_num - 1] by vector.size - res_num[0...hop_num - 2]
+        // push self
         if (threadIdx.x == 0 && hop_num < hops) {
-//            AtomicAdd<int64_t>(&local_res_num[hop_num - 1],
-//                               deg <= num_picks[hop_num - 1] ? deg : num_picks[hop_num - 1]);
-            local_res_num[hop_num - 1] += deg <= num_picks[hop_num - 1] ? deg : num_picks[hop_num - 1];
             auto dup_res = set.insert({hop_num + 1, row});
             if (dup_res.second) {
 //                std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, row);
@@ -314,11 +294,6 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 //        __syncthreads();
     }
     __syncthreads();
-
-    // write local_res_num to global
-    if (threadIdx.x < hops - 1){
-        AtomicAdd<int64_t>(&res_num[threadIdx.x], local_res_num[threadIdx.x]);
-    }
 }
 
 /**
@@ -596,12 +571,6 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
 //    int64_t * d_num_picks = static_cast<int64_t *>(device->AllocWorkspace(ctx, hops * sizeof(int64_t)));
     // res num per hop
-    int64_t * d_res_num = static_cast<int64_t *>(device->AllocWorkspace(ctx, (hops - 1) * sizeof(int64_t)));
-
-    // hops must > 1?
-    auto res_num = (int64_t *)malloc((hops - 1) * sizeof(int64_t));
-//    int64_t * res_num = static_cast<int64_t *>(device->AllocWorkspace(DGLContext{kDGLCPU, 0}, hops * sizeof(int64_t)));
-    CUDA_CALL(cudaMemset(d_res_num, 0, (hops - 1) * sizeof(int64_t)));
 
 //    cudaEvent_t copyEvent;
 //    CUDA_CALL(cudaEventCreate(&copyEvent));
@@ -617,15 +586,11 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     // picked_row, picked_col, picked_idx: IdArray(NdArray)
     // out_row, out_col, out_idx: The data pointer points to the allocated data space(here is device ptr)
     std::vector<IdArray> picked_rows(hops), picked_cols(hops), picked_indices(hops);
-//    std::vector<int64_t*> out_rows(hops), out_cols(hops), out_indices(hops), out_ptrs(hops),
-//    out_degrees(hops), new_lens(hops);
-
-//    cudaEvent_t copyEvents[hops];
 
     // allocate space for stdgpu container
     stdgpu::index_t cap = num_rows;
     // last hop sample result do not need to enqueue
-    for (int i = 0; i < num_picks->shape[0] - 1; i++)
+    for (int i = 0; i < hops - 1; i++)
         cap += cap * (num_picks_vec[i] + 1);
     // pair(hop_num, src_node_id)
     auto task_queue = stdgpu::queue<thrust::pair<int, int64_t>>::createDeviceObject(cap);
@@ -642,7 +607,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     stdgpu::index_t vector_cap = num_rows * num_picks_vec[0];
     // last hop sample result need to push into result vector
-    for (int i = 1; i < num_picks->shape[0]; i++)
+    for (int i = 1; i < hops; i++)
         // the dstnodes of current hop should be the srcnodes of next hop
         vector_cap += vector_cap * (num_picks_vec[i] + 1);
     auto res_vector = stdgpu::vector<selectedEdgeInfo>::createDeviceObject(vector_cap);
@@ -663,33 +628,19 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     // should gird num be max?
     // best performance:arxiv, [25,10]
     const dim3 grid(num_rows);
-//    const dim3 grid(256);
-//    const dim3 grid(128);
-//    const dim3 grid(64);
-//    const dim3 grid(1);
+
     // wait for copying `d_num_picks` to finish
 //    CUDA_CALL(cudaEventSynchronize(copyEvent));
 //    CUDA_CALL(cudaEventDestroy(copyEvent));
-    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, (hops - 1) * sizeof(int64_t), stream,
-                     random_seed, num_picks_ptr, d_res_num, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
-                     task_queue, set, res_vector);
-//    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
-//                     random_seed, d_num_picks, d_res_num, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
+//    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, (hops - 1) * sizeof(int64_t), stream,
+//                     random_seed, num_picks_ptr, d_res_num, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
 //                     task_queue, set, res_vector);
+
+    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
+                     random_seed, num_picks_ptr, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
+                     task_queue, set, res_vector);
     assert(task_queue.empty());
 //    std::printf("cuda kernel finished\n");
-
-    cudaEvent_t copyBackEvent;
-    CUDA_CALL(cudaEventCreate(&copyBackEvent));
-    device->CopyDataFromTo(
-            d_res_num, 0, res_num, 0, (hops - 1) * sizeof(int64_t),
-            ctx, DGLContext{kDGLCPU, 0}, mat.indptr->dtype);
-    CUDA_CALL(cudaEventRecord(copyBackEvent, stream));
-    // wait for copying back `d_res_num` to finish
-    CUDA_CALL(cudaEventSynchronize(copyBackEvent));
-    CUDA_CALL(cudaEventDestroy(copyBackEvent));
-//    device->FreeWorkspace(ctx, d_num_picks);
-    device->FreeWorkspace(ctx, d_res_num);
 
     stdgpu::queue<thrust::pair<int, int64_t>>::destroyDeviceObject(task_queue);
     stdgpu::unordered_set<thrust::pair<int, int64_t>, PairHash > ::destroyDeviceObject(set);
@@ -699,14 +650,13 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     std::vector<COOMatrix> ret_coo(hops);
 //    cudaPointerAttributes attributes;
 //    std::printf("result vector size: %ld\n", res_vector.size());
-    int64_t last_hop_size = res_vector.size();
+    int64_t hop_res_num = num_rows * num_picks_vec[0];
     for(int i = 0; i < hops; i++) {
-//        std::printf("res_num[%d]: %ld\n", i, res_num[i]);
+        picked_rows[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
+        picked_cols[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
+        picked_indices[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
         if (i < hops - 1)
-            last_hop_size -= res_num[i];
-        picked_rows[i] = NewIdArray(i < hops - 1 ? res_num[i] : last_hop_size, ctx, sizeof(int64_t) * 8);
-        picked_cols[i] = NewIdArray(i < hops - 1 ? res_num[i] : last_hop_size, ctx, sizeof(int64_t) * 8);
-        picked_indices[i] = NewIdArray(i < hops - 1 ? res_num[i] : last_hop_size, ctx, sizeof(int64_t) * 8);
+            hop_res_num = hop_res_num * (num_picks_vec[i + 1] + 1);
         auto out_rows = static_cast<int64_t*>(picked_rows[i]->data);
         auto out_cols = static_cast<int64_t*>(picked_cols[i]->data);
         auto out_idx = static_cast<int64_t*>(picked_indices[i]->data);
@@ -715,119 +665,39 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //        {
 //            std::cout << "Device pointer is a valid device pointer." << std::endl;
 //        }
-        thrust::copy_if(
+        auto zip_begin = thrust::make_zip_iterator(thrust::make_tuple(
+                thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
+                thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
+                thrust::make_transform_iterator(range_vec.begin(), DataTrans())
+        ));
+        auto zip_end = thrust::make_zip_iterator(thrust::make_tuple(
+                thrust::make_transform_iterator(range_vec.end(), RowTrans()),
+                thrust::make_transform_iterator(range_vec.end(), ColTrans()),
+                thrust::make_transform_iterator(range_vec.end(), DataTrans())
+        ));
+        auto zip_res = thrust::make_zip_iterator(thrust::make_tuple(
+                out_rows,
+                out_cols,
+                out_idx
+        ));
+        int64_t new_size = thrust::copy_if(
                 thrust::device,
-                thrust::make_zip_iterator(thrust::make_tuple(
-                        thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
-                        thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
-                        thrust::make_transform_iterator(range_vec.begin(), DataTrans())
-                        )),
-                thrust::make_zip_iterator(thrust::make_tuple(
-                        thrust::make_transform_iterator(range_vec.end(), RowTrans()),
-                        thrust::make_transform_iterator(range_vec.end(), ColTrans()),
-                        thrust::make_transform_iterator(range_vec.end(), DataTrans())
-                )),
+                zip_begin,
+                zip_end,
                 thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
-                thrust::make_zip_iterator(thrust::make_tuple(
-                        out_rows,
-                        out_cols,
-                        out_idx
-                )),
+                zip_res,
                 CheckHopNum(i + 1)
-                );
-//        thrust::copy_if(
-//                thrust::device,
-//                thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
-//                thrust::make_transform_iterator(range_vec.end(), RowTrans()),
-//                thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
-//                out_rows,
-//                CheckHopNum(i + 1)
-//                );
-//        thrust::copy_if(
-//                thrust::device,
-//                thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
-//                thrust::make_transform_iterator(range_vec.end(), ColTrans()),
-//                thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
-//                out_cols,
-//                CheckHopNum(i + 1)
-//        );
-//        thrust::copy_if(
-//                thrust::device,
-//                thrust::make_transform_iterator(range_vec.begin(), DataTrans()),
-//                thrust::make_transform_iterator(range_vec.end(), DataTrans()),
-//                thrust::make_transform_iterator(range_vec.begin(), HopTrans()),
-//                out_idx,
-//                CheckHopNum(i + 1)
-//        );
-        // inplace
-//        thrust::transform(out_rows, out_rows + res_num[i], out_rows, RowTrans());
-//        thrust::transform(out_cols, out_rows + res_num[i], out_cols, ColTrans());
-//        thrust::transform(out_idx, out_rows + res_num[i], out_idx, DataTrans());
+                ) - zip_res;
+
+        picked_rows[i] = picked_rows[i].CreateView({new_size}, picked_rows[i]->dtype);
+        picked_cols[i] = picked_cols[i].CreateView({new_size}, picked_cols[i]->dtype);
+        picked_indices[i] = picked_indices[i].CreateView({new_size}, picked_indices[i]->dtype);
         ret_coo[i] = COOMatrix(mat.num_rows, mat.num_cols, picked_rows[i], picked_cols[i], picked_indices[i]);
     }
 
-    free(res_num);
     stdgpu::vector<selectedEdgeInfo>::destroyDeviceObject(res_vector);
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
     return ret_coo;
-
-//    for(int i = 0; i < hops; i++){
-//        // allocate space for COO result on device
-//        picked_rows[i] = NewIdArray(num_rows * num_picks[i], ctx, sizeof(int64_t) * 8);
-//        picked_cols[i] = NewIdArray(num_rows * num_picks[i], ctx, sizeof(int64_t) * 8);
-//        picked_indices[i] = NewIdArray(num_rows * num_picks[i], ctx, sizeof(int64_t) * 8);
-//        out_rows[i] = static_cast<int64_t*>(picked_rows[i]->data);
-//        out_cols[i] = static_cast<int64_t*>(picked_cols[i]->data);
-//        out_indices[i] = static_cast<int64_t*>(picked_indices[i]->data);
-//
-//        // compute degree
-//        out_degrees[i] = static_cast<int64_t*>(
-//                device->AllocWorkspace(ctx, (num_rows + 1) * sizeof(int64_t)));
-//        const dim3 block(512);
-//        const dim3 grid((num_rows + block.x - 1) / block.x);
-//        CUDA_KERNEL_CALL(
-//                _CSRRowWiseSampleDegreeKernel, grid, block, 0, stream, num_picks[i],
-//                num_rows, slice_rows, in_ptr, out_degrees[i]);
-//
-//        // fill out_ptrs
-//        out_ptrs[i] = static_cast<int64_t*>(
-//                device->AllocWorkspace(ctx, (num_rows + 1) * sizeof(int64_t)));
-//        size_t prefix_temp_size = 0;
-//        CUDA_CALL(cub::DeviceScan::ExclusiveSum(
-//                nullptr, prefix_temp_size, out_degrees[i], out_ptrs[i], num_rows + 1, stream));
-//        void* prefix_temp = device->AllocWorkspace(ctx, prefix_temp_size);
-//        CUDA_CALL(cub::DeviceScan::ExclusiveSum(
-//                prefix_temp, prefix_temp_size, out_degrees[i], out_ptrs[i], num_rows + 1, stream));
-//        device->FreeWorkspace(ctx, prefix_temp);
-//        device->FreeWorkspace(ctx, out_degrees[i]);
-//
-//        CUDA_CALL(cudaEventCreate(&copyEvents[i]));
-//        // new_len, i.e. the number of sampled edges, last element of out_ptr
-//        // copy using the internal current stream
-//        device->CopyDataFromTo(
-//            out_ptrs[i], num_rows * sizeof(new_lens[i]), &new_lens[i], 0, sizeof(new_lens[i]),
-//            ctx,DGLContext{kDGLCPU, 0}, mat.indptr->dtype);
-//        CUDA_CALL(cudaEventRecord(copyEvents[i], stream));
-//    }
-//
-//    const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
-//
-//    const dim3 block(BLOCK_SIZE);
-//    const dim3 grid(cudaDevAttrMaxGridDimX);
-//    CUDA_KERNEL_CALL(
-//            (_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0,
-//            stream, random_seed, num_picks, num_rows, slice_rows, in_ptr, in_cols,
-//            data, out_ptrs, out_rows, out_cols, out_indices);
-//
-//    for (auto& copyEvent:copyEvents) {
-//        // wait for copying `new_len` to finish
-//        CUDA_CALL(cudaEventSynchronize(copyEvent));
-//        CUDA_CALL(cudaEventDestroy(copyEvent));
-//    }
-
-    // need picked_row, picked_col, picked_idx with proper data(out_row, out_col, out_idx), remember these are device ptrs
-//    return COOMatrix(
-//            mat.num_rows, mat.num_cols, picked_row, picked_col, picked_idx);
 }
 
 template COOMatrix CSRRowWiseSamplingUniform<kDGLCUDA, int32_t>(
