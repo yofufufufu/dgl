@@ -191,7 +191,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 //    __syncthreads();
 
     // init local_res_num
-    if (threadIdx.x < hops){
+    if (threadIdx.x < hops - 1) {
         local_res_num[threadIdx.x] = 0;
     }
 //    __syncthreads();
@@ -297,20 +297,19 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             }
         }
         // update local_res_num and push self
-        if (threadIdx.x == 0){
+        // we can get res_num[hop_num - 1] by vector.size - res_num[0...hop_num - 2]
+        if (threadIdx.x == 0 && hop_num < hops) {
 //            AtomicAdd<int64_t>(&local_res_num[hop_num - 1],
 //                               deg <= num_picks[hop_num - 1] ? deg : num_picks[hop_num - 1]);
             local_res_num[hop_num - 1] += deg <= num_picks[hop_num - 1] ? deg : num_picks[hop_num - 1];
-            if (hop_num < hops){
-                auto dup_res = set.insert({hop_num + 1, row});
-                if (dup_res.second){
+            auto dup_res = set.insert({hop_num + 1, row});
+            if (dup_res.second) {
 //                std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, row);
-                    task_queue.push({hop_num + 1, row});
+                task_queue.push({hop_num + 1, row});
 //                std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, row);
-                }
+            }
 //            else
 //                std::printf("insert hop_num: %d, row: %ld false\n", hop_num + 1, row);
-            }
         }
 //        __syncthreads();
     }
@@ -597,10 +596,12 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
 //    int64_t * d_num_picks = static_cast<int64_t *>(device->AllocWorkspace(ctx, hops * sizeof(int64_t)));
     // res num per hop
-    int64_t * d_res_num = static_cast<int64_t *>(device->AllocWorkspace(ctx, hops * sizeof(int64_t)));
-    auto res_num = (int64_t *)malloc(hops * sizeof(int64_t));
+    int64_t * d_res_num = static_cast<int64_t *>(device->AllocWorkspace(ctx, (hops - 1) * sizeof(int64_t)));
+
+    // hops must > 1?
+    auto res_num = (int64_t *)malloc((hops - 1) * sizeof(int64_t));
 //    int64_t * res_num = static_cast<int64_t *>(device->AllocWorkspace(DGLContext{kDGLCPU, 0}, hops * sizeof(int64_t)));
-    CUDA_CALL(cudaMemset(d_res_num, 0, hops * sizeof(int64_t)));
+    CUDA_CALL(cudaMemset(d_res_num, 0, (hops - 1) * sizeof(int64_t)));
 
 //    cudaEvent_t copyEvent;
 //    CUDA_CALL(cudaEventCreate(&copyEvent));
@@ -669,7 +670,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     // wait for copying `d_num_picks` to finish
 //    CUDA_CALL(cudaEventSynchronize(copyEvent));
 //    CUDA_CALL(cudaEventDestroy(copyEvent));
-    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, hops * sizeof(int64_t), stream,
+    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, (hops - 1) * sizeof(int64_t), stream,
                      random_seed, num_picks_ptr, d_res_num, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
                      task_queue, set, res_vector);
 //    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
@@ -681,7 +682,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     cudaEvent_t copyBackEvent;
     CUDA_CALL(cudaEventCreate(&copyBackEvent));
     device->CopyDataFromTo(
-            d_res_num, 0, res_num, 0, hops * sizeof(int64_t),
+            d_res_num, 0, res_num, 0, (hops - 1) * sizeof(int64_t),
             ctx, DGLContext{kDGLCPU, 0}, mat.indptr->dtype);
     CUDA_CALL(cudaEventRecord(copyBackEvent, stream));
     // wait for copying back `d_res_num` to finish
@@ -698,11 +699,14 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     std::vector<COOMatrix> ret_coo(hops);
 //    cudaPointerAttributes attributes;
 //    std::printf("result vector size: %ld\n", res_vector.size());
+    int64_t last_hop_size = res_vector.size();
     for(int i = 0; i < hops; i++) {
 //        std::printf("res_num[%d]: %ld\n", i, res_num[i]);
-        picked_rows[i] = NewIdArray(res_num[i], ctx, sizeof(int64_t) * 8);
-        picked_cols[i] = NewIdArray(res_num[i], ctx, sizeof(int64_t) * 8);
-        picked_indices[i] = NewIdArray(res_num[i], ctx, sizeof(int64_t) * 8);
+        if (i < hops - 1)
+            last_hop_size -= res_num[i];
+        picked_rows[i] = NewIdArray(i < hops - 1 ? res_num[i] : last_hop_size, ctx, sizeof(int64_t) * 8);
+        picked_cols[i] = NewIdArray(i < hops - 1 ? res_num[i] : last_hop_size, ctx, sizeof(int64_t) * 8);
+        picked_indices[i] = NewIdArray(i < hops - 1 ? res_num[i] : last_hop_size, ctx, sizeof(int64_t) * 8);
         auto out_rows = static_cast<int64_t*>(picked_rows[i]->data);
         auto out_cols = static_cast<int64_t*>(picked_cols[i]->data);
         auto out_idx = static_cast<int64_t*>(picked_indices[i]->data);
