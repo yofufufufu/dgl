@@ -194,18 +194,16 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
     curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
 //    curand_init(rand_seed, 0, 0, &rng);
 
-    while (true){
-        if (threadIdx.x == 0){
+    while (true) {
+        if (threadIdx.x == 0) {
             auto pop_res = task_queue.pop();
-            if (!pop_res.second)
-                sharedRes[0] = pop_res.second;
-            else{
+            sharedRes[0] = pop_res.second;
+            if (pop_res.second) {
                 auto task = pop_res.first;
                 // hop num
                 blockTask[0] = task.first;
                 // row_num
                 blockTask[1] = task.second;
-                sharedRes[0] = pop_res.second;
             }
         }
         __syncthreads();
@@ -226,15 +224,15 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         if (deg <= num_picks[hop_num - 1]) {
 //            std::printf("row: %ld, deg: %ld, num_picks: %ld\n", row, deg, num_picks[hop_num - 1]);
             // just copy row when there is not enough nodes to sample
-            for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE){
+            for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
                 const int64_t in_idx = in_row_start + idx;
                 result.push_back({hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx});
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
                 // last hop don't need to push task
-                if (hop_num < hops){
+                if (hop_num < hops) {
                     auto dup_res = set.insert({hop_num + 1, in_index[in_idx]});
                     // if insert successfully, means no duplication, push task
-                    if (dup_res.second){
+                    if (dup_res.second) {
 //                        std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, in_index[in_idx]);
                         task_queue.push({hop_num + 1, in_index[in_idx]});
 //                        std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, in_index[in_idx]);
@@ -243,8 +241,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //                        std::printf("insert hop_num: %d, row: %ld false\n", hop_num + 1, in_index[in_idx]);
                 }
             }
-        }
-        else {
+        } else {
             // generate permutation list via reservoir algorithm
             // reservoir init
             for (int idx = threadIdx.x; idx < num_picks[hop_num - 1]; idx += BLOCK_SIZE) {
@@ -267,10 +264,10 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
                 result.push_back({hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx});
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
                 // last hop don't need to push task
-                if (hop_num < hops){
+                if (hop_num < hops) {
                     auto dup_res = set.insert({hop_num + 1, in_index[perm_idx]});
                     // if insert successfully, means no duplication, push task
-                    if (dup_res.second){
+                    if (dup_res.second) {
 //                        std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, in_index[perm_idx]);
                         task_queue.push({hop_num + 1, in_index[perm_idx]});
 //                        std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, in_index[perm_idx]);
