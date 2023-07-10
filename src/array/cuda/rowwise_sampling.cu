@@ -167,7 +167,7 @@ __global__ void queue_init(
     }
 }
 
-__global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
+__launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         const uint64_t rand_seed, const int64_t * num_picks, const int64_t * const in_rows, const int64_t num_rows, const int hops,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
         stdgpu::queue<thrust::pair<int, int64_t>> task_queue,
