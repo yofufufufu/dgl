@@ -174,10 +174,13 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         stdgpu::unordered_set<thrust::pair<int, int64_t>, PairHash> set,
         stdgpu::vector<selectedEdgeInfo> result
         ) {
-    __shared__ int64_t blockTask[2];
-    __shared__ bool sharedRes[1];
+//    __shared__ int64_t blockTask[2];
+//    __shared__ bool sharedRes[1];
     // num_pick cannot be larger than 128
     // any better solution?
+
+    // if use warp-wise, BlockSize=128(4 warps), we assume num_pick cannot be larger than 32
+    // i.e. each warp has permList[32]
     __shared__ int64_t permList[128];
 
     // do not use separate init kernel maybe faster? the result seems correct although only block level sync
@@ -194,37 +197,46 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
     curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
 //    curand_init(rand_seed, 0, 0, &rng);
 
+    int warpId = threadIdx.x / warpSize;
+    int laneId = threadIdx.x % warpSize;
+//    curand_init(rand_seed * gridDim.x + warpId, threadIdx.x, 0, &rng);
     while (true) {
-        if (threadIdx.x == 0) {
+        int hop_num;
+        int64_t row;
+        bool sharedRes;
+        if (laneId == 0) {
             auto pop_res = task_queue.pop();
-            sharedRes[0] = pop_res.second;
-            if (pop_res.second) {
+            sharedRes = pop_res.second;
+            if (sharedRes) {
                 auto task = pop_res.first;
                 // hop num
-                blockTask[0] = task.first;
+                hop_num = task.first;
                 // row_num
-                blockTask[1] = task.second;
+                row = task.second;
             }
         }
-        __syncthreads();
+        __syncwarp();
+        sharedRes = __shfl_sync(0xFFFFFFFF, sharedRes, 0);
 //        if (!sharedRes[0] && task_queue.empty())
-        if (!sharedRes[0])
+        if (!sharedRes)
             break;
+        hop_num = __shfl_sync(0xFFFFFFFF, hop_num, 0);
+        row = __shfl_sync(0xFFFFFFFF, row, 0);
         // result.size() > num_rows * 5 just for test, should have a better check policy
 //        if (!sharedRes[0] && result.size() > num_rows * 5)
 //            break;
 //        else if (!sharedRes[0])
 //            continue;
         // run task, same block threads have same task(hop_num, row_num)
-        const int hop_num = blockTask[0];
-        const int64_t row = blockTask[1];
+//        const int hop_num = blockTask[0];
+//        const int64_t row = blockTask[1];
         const int64_t in_row_start = in_ptr[row];
         const int64_t deg = in_ptr[row + 1] - in_row_start;
 
         if (deg <= num_picks[hop_num - 1]) {
 //            std::printf("row: %ld, deg: %ld, num_picks: %ld\n", row, deg, num_picks[hop_num - 1]);
             // just copy row when there is not enough nodes to sample
-            for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
+            for (int idx = laneId; idx < deg; idx += warpSize) {
                 const int64_t in_idx = in_row_start + idx;
                 result.push_back({hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx});
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
@@ -244,23 +256,28 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         } else {
             // generate permutation list via reservoir algorithm
             // reservoir init
-            for (int idx = threadIdx.x; idx < num_picks[hop_num - 1]; idx += BLOCK_SIZE) {
-                permList[idx] = idx;
+            int permStart = warpId * 128 / (BLOCK_SIZE / warpSize);
+            for (int idx = laneId; idx < num_picks[hop_num - 1]; idx += warpSize) {
+                permList[idx + permStart] = idx;
             }
-            __syncthreads();
+            __syncwarp();
 
-            for (int idx = num_picks[hop_num - 1] + threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
+            for (int idx = num_picks[hop_num - 1] + laneId; idx < deg; idx += warpSize) {
                 const int num = curand(&rng) % (idx + 1);
+                // 能不能利用warp primitive找到计算得到相同num的warp thread，再从中取出最大的?
                 if (num < num_picks[hop_num - 1]) {
+                    auto active_threads = __match_any_sync(__activemask(), num);
                     // use shared memory, faster than DGL?
-                    AtomicMax(permList + num, idx);
+                    if (laneId == 31 - __clz(active_threads))
+                        permList[permStart + num] = idx;
+//                    AtomicMax(permList + permStart + num, idx);
                 }
             }
-            __syncthreads();
+            __syncwarp();
 
-            for (int idx = threadIdx.x; idx < num_picks[hop_num - 1]; idx += BLOCK_SIZE) {
+            for (int idx = laneId; idx < num_picks[hop_num - 1]; idx += warpSize) {
                 // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
-                const int64_t perm_idx = permList[idx] + in_row_start;
+                const int64_t perm_idx = permList[idx + permStart] + in_row_start;
                 result.push_back({hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx});
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
                 // last hop don't need to push task
@@ -278,7 +295,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
             }
         }
         // push self
-        if (threadIdx.x == 0 && hop_num < hops) {
+        if (laneId == 0 && hop_num < hops) {
             auto dup_res = set.insert({hop_num + 1, row});
             if (dup_res.second) {
 //                std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, row);
@@ -623,7 +640,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    const dim3 block(32);
     // should gird num be max?
     // best performance:arxiv, [25,10]
-    const dim3 grid(num_rows);
+//    const dim3 grid(num_rows);
+    const dim3 grid(num_rows / (BLOCK_SIZE / 32));
 
     // wait for copying `d_num_picks` to finish
 //    CUDA_CALL(cudaEventSynchronize(copyEvent));
