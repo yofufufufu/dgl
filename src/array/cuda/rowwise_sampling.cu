@@ -290,7 +290,6 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         }
 //        __syncthreads();
     }
-    __syncthreads();
 }
 
 /**
