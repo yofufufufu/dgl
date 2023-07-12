@@ -29,6 +29,7 @@ namespace impl {
 namespace {
 
 constexpr int BLOCK_SIZE = 128;
+constexpr int SHARED_PERM_LEN = 128;
 
 /**
  * @brief Compute the size of each row in the sampled CSR, without replacement.
@@ -181,7 +182,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 
     // if use warp-wise, BlockSize=128(4 warps), we assume num_pick cannot be larger than 32
     // i.e. each warp has permList[32]
-    __shared__ int64_t permList[128];
+    __shared__ int64_t permList[SHARED_PERM_LEN];
 
     // do not use separate init kernel maybe faster? the result seems correct although only block level sync
     // not correct! convergence will be changed(accuracy~0.6, correct accuracy~0.7)
@@ -256,7 +257,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         } else {
             // generate permutation list via reservoir algorithm
             // reservoir init
-            int permStart = warpId * 128 / (BLOCK_SIZE / warpSize);
+            int permStart = warpId % (BLOCK_SIZE / warpSize) * SHARED_PERM_LEN / (BLOCK_SIZE / warpSize);
             for (int idx = laneId; idx < num_picks[hop_num - 1]; idx += warpSize) {
                 permList[idx + permStart] = idx;
             }
