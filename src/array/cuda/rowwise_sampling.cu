@@ -9,6 +9,7 @@
 #include <dgl/runtime/device_api.h>
 
 #include <stdgpu/unordered_set.cuh>
+#include <stdgpu/bitset.cuh>
 #include <stdgpu/queue.cuh>
 #include <stdgpu/deque.cuh>
 #include <stdgpu/vector.cuh>
@@ -104,21 +105,6 @@ struct selectedEdgeInfo {
     int64_t data_num;
 };
 
-struct PairHash {
-    inline STDGPU_HOST_DEVICE std::size_t
-    operator()(const thrust::pair<int, int64_t>& pair) const
-    {
-        std::size_t x = pair.first;
-        std::size_t y = pair.second;
-
-        // Cantor pairing function
-        // 数太大会溢出，考虑用别的hash函数
-        std::size_t hashValue = ((x + y) * (x + y + 1)) / 2 + y;
-//        std::printf("x: %d, y: %ld, hash: %ld\n", x, y, hashValue);
-        return hashValue;
-    }
-};
-
 struct CheckHopNum {
     int hop_num;
     CheckHopNum(int num) : hop_num(num) {};
@@ -171,7 +157,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         const uint64_t rand_seed, const int64_t * num_picks, const int64_t * const in_rows, const int64_t num_rows, const int hops,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
         stdgpu::queue<thrust::pair<int, int64_t>> task_queue,
-        stdgpu::unordered_set<thrust::pair<int, int64_t>, PairHash> set,
+        stdgpu::bitset<> bits,
         stdgpu::vector<selectedEdgeInfo> result
         ) {
     __shared__ int64_t blockTask[2];
@@ -230,15 +216,12 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
                 // last hop don't need to push task
                 if (hop_num < hops) {
-                    auto dup_res = set.insert({hop_num + 1, in_index[in_idx]});
-                    // if insert successfully, means no duplication, push task
-                    if (dup_res.second) {
-//                        std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, in_index[in_idx]);
-                        task_queue.push({hop_num + 1, in_index[in_idx]});
-//                        std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, in_index[in_idx]);
+                    if (!bits.test(in_index[in_idx] * hop_num)){
+                        auto old = bits.set(in_index[in_idx] * hop_num);
+                        if (!old) {
+                            task_queue.push({hop_num + 1, in_index[in_idx]});
+                        }
                     }
-//                    else
-//                        std::printf("insert hop_num: %d, row: %ld false\n", hop_num + 1, in_index[in_idx]);
                 }
             }
         } else {
@@ -265,28 +248,23 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
                 // last hop don't need to push task
                 if (hop_num < hops) {
-                    auto dup_res = set.insert({hop_num + 1, in_index[perm_idx]});
-                    // if insert successfully, means no duplication, push task
-                    if (dup_res.second) {
-//                        std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, in_index[perm_idx]);
-                        task_queue.push({hop_num + 1, in_index[perm_idx]});
-//                        std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, in_index[perm_idx]);
+                    if (!bits.test(in_index[perm_idx] * hop_num)){
+                        auto old = bits.set(in_index[perm_idx] * hop_num);
+                        if (!old) {
+                            task_queue.push({hop_num + 1, in_index[perm_idx]});
+                        }
                     }
-//                    else
-//                        std::printf("insert hop_num: %d, row: %ld false\n", hop_num + 1, in_index[perm_idx]);
                 }
             }
         }
         // push self
         if (threadIdx.x == 0 && hop_num < hops) {
-            auto dup_res = set.insert({hop_num + 1, row});
-            if (dup_res.second) {
-//                std::printf("insert hop_num: %d, row: %ld success\n", hop_num + 1, row);
-                task_queue.push({hop_num + 1, row});
-//                std::printf("task queue push hop_num: %d, row: %ld\n", hop_num + 1, row);
+            if (!bits.test(in_index[row] * hop_num)){
+                auto old = bits.set(in_index[row] * hop_num);
+                if (!old) {
+                    task_queue.push({hop_num + 1, row});
+                }
             }
-//            else
-//                std::printf("insert hop_num: %d, row: %ld false\n", hop_num + 1, row);
         }
 //        __syncthreads();
     }
@@ -590,11 +568,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         cap += cap * (num_picks_vec[i] + 1);
     // pair(hop_num, src_node_id)
     auto task_queue = stdgpu::queue<thrust::pair<int, int64_t>>::createDeviceObject(cap);
-    auto set = stdgpu::unordered_set
-            <
-            thrust::pair<int, int64_t>,
-            PairHash
-            >::createDeviceObject(cap);
+    auto bits = stdgpu::bitset<>::createDeviceObject(static_cast<stdgpu::index_t>(mat.num_rows * (hops - 1)));
     // init
     const dim3 init_block(512);
     const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
@@ -634,12 +608,12 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
                      random_seed, num_picks_ptr, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
-                     task_queue, set, res_vector);
+                     task_queue, bits, res_vector);
     assert(task_queue.empty());
 //    std::printf("cuda kernel finished\n");
 
     stdgpu::queue<thrust::pair<int, int64_t>>::destroyDeviceObject(task_queue);
-    stdgpu::unordered_set<thrust::pair<int, int64_t>, PairHash > ::destroyDeviceObject(set);
+    stdgpu::bitset<>::destroyDeviceObject(bits);
 
     // 传多个COO res的row, col, idx的指针的指针，用res_vector取fill，逻辑上最直观. 传指针的指针要写个demo试一下
     auto range_vec = res_vector.device_range();
