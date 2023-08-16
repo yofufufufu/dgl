@@ -634,14 +634,17 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    std::printf("result vector size: %ld\n", res_vector.size());
     int64_t hop_res_num = num_rows * num_picks_vec[0];
     for(int i = 0; i < hops; i++) {
+        nvtxRangePushA("NewIdArray");
         picked_rows[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
         picked_cols[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
         picked_indices[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
+        nvtxRangePop();
         if (i < hops - 1)
             hop_res_num = hop_res_num * (num_picks_vec[i + 1] + 1);
         auto out_rows = static_cast<int64_t*>(picked_rows[i]->data);
         auto out_cols = static_cast<int64_t*>(picked_cols[i]->data);
         auto out_idx = static_cast<int64_t*>(picked_indices[i]->data);
+        nvtxRangePushA("thrust process");
 //        CUDA_CALL(cudaPointerGetAttributes(&attributes, out_rows));
 //        if (attributes.type == cudaMemoryTypeDevice)
 //        {
@@ -670,18 +673,21 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
                 zip_res,
                 CheckHopNum(i + 1)
                 ) - zip_res;
+        nvtxRangePop();
 
+        nvtxRangePushA("CreateView");
         picked_rows[i] = picked_rows[i].CreateView({new_size}, picked_rows[i]->dtype);
         picked_cols[i] = picked_cols[i].CreateView({new_size}, picked_cols[i]->dtype);
         picked_indices[i] = picked_indices[i].CreateView({new_size}, picked_indices[i]->dtype);
+        nvtxRangePop();
         ret_coo[i] = COOMatrix(mat.num_rows, mat.num_cols, picked_rows[i], picked_cols[i], picked_indices[i]);
     }
     nvtxRangePop();
 
-    nvtxRangePushA("free res_vector");
-    // should free once... but I have not found an easy way to code
+//    nvtxRangePushA("free res_vector");
+    //TODO: should free once when program ends(last iteration)... but I have not found an easy way to do that.
 //    stdgpu::vector<selectedEdgeInfo>::destroyDeviceObject(res_vector);
-    nvtxRangePop();
+//    nvtxRangePop();
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
     return ret_coo;
 }
