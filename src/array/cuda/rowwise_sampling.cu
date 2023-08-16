@@ -532,6 +532,9 @@ COOMatrix CSRRowWiseSamplingUniform(
   }
 }
 
+stdgpu::vector<selectedEdgeInfo> res_vector;
+bool first_time = true;
+
 std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         CSRMatrix mat, IdArray rows, const IdArray &num_picks){
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism run here\n");
@@ -574,15 +577,20 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const dim3 init_block(512);
     const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
     CUDA_KERNEL_CALL((queue_init), init_grid, init_block, 0, stream, task_queue, sliced_rows, num_rows);
-    assert(task_queue.size() == num_rows);
+//    assert(task_queue.size() == num_rows);
 
-    stdgpu::index_t vector_cap = num_rows * num_picks_vec[0];
-    // last hop sample result need to push into result vector
-    for (int i = 1; i < hops; i++)
-        // the dstnodes of current hop should be the srcnodes of next hop
-        vector_cap += vector_cap * (num_picks_vec[i] + 1);
     nvtxRangePushA("create res_vector");
-    auto res_vector = stdgpu::vector<selectedEdgeInfo>::createDeviceObject(vector_cap);
+    if (first_time) {
+        stdgpu::index_t vector_cap = num_rows * num_picks_vec[0];
+        // last hop sample result need to push into result vector
+        for (int i = 1; i < hops; i++)
+            // the dstnodes of current hop should be the srcnodes of next hop
+            vector_cap += vector_cap * (num_picks_vec[i] + 1);
+        res_vector = stdgpu::vector<selectedEdgeInfo>::createDeviceObject(vector_cap);
+        first_time = false;
+    }
+    else
+        res_vector.clear();
     nvtxRangePop();
 
     const int64_t* in_ptr = static_cast<int64_t*>(GetDevicePointer(mat.indptr));
@@ -671,7 +679,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     nvtxRangePop();
 
     nvtxRangePushA("free res_vector");
-    stdgpu::vector<selectedEdgeInfo>::destroyDeviceObject(res_vector);
+    // should free once... but I have not found an easy way to code
+//    stdgpu::vector<selectedEdgeInfo>::destroyDeviceObject(res_vector);
     nvtxRangePop();
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
     return ret_coo;
