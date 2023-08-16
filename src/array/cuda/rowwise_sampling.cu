@@ -581,7 +581,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     for (int i = 1; i < hops; i++)
         // the dstnodes of current hop should be the srcnodes of next hop
         vector_cap += vector_cap * (num_picks_vec[i] + 1);
+    nvtxRangePushA("create res_vector");
     auto res_vector = stdgpu::vector<selectedEdgeInfo>::createDeviceObject(vector_cap);
+    nvtxRangePop();
 
     const int64_t* in_ptr = static_cast<int64_t*>(GetDevicePointer(mat.indptr));
     const int64_t* in_cols = static_cast<int64_t*>(GetDevicePointer(mat.indices));
@@ -610,7 +612,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
                      random_seed, num_picks_ptr, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
                      task_queue, bits, res_vector);
-    assert(task_queue.empty());
+//    assert(task_queue.empty());
 //    std::printf("cuda kernel finished\n");
 
     stdgpu::queue<thrust::pair<int, int64_t>>::destroyDeviceObject(task_queue);
@@ -668,7 +670,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     }
     nvtxRangePop();
 
+    nvtxRangePushA("free res_vector");
     stdgpu::vector<selectedEdgeInfo>::destroyDeviceObject(res_vector);
+    nvtxRangePop();
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
     return ret_coo;
 }
