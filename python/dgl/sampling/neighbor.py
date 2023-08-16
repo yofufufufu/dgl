@@ -223,7 +223,9 @@ def sample_neighbors_task_parallelism(g, nodes, fanouts,):
         else:
             nodes_all_types.append(nd.array([], ctx=ctx))
 
+    torch.cuda.nvtx.range_push("_CAPI_CustomSampleNeighborsTaskParallelism")
     subgs = _CAPI_CustomSampleNeighborsTaskParallelism(g._graph, nodes_all_types, fanout_array,)
+    torch.cuda.nvtx.range_pop()
     retList = []
     for subg in subgs:
         induced_edges = subg.induced_edges

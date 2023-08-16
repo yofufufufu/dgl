@@ -15,6 +15,7 @@
 #include <stdgpu/vector.cuh>
 
 #include <numeric>
+#include <nvtx3/nvToolsExt.h>
 
 #include "../../array/cuda/atomic.cuh"
 #include "../../runtime/cuda/cuda_common.h"
@@ -99,7 +100,7 @@ __global__ void _CSRRowWiseSampleDegreeReplaceKernel(
 
 // the sample result of a hop
 struct selectedEdgeInfo {
-    int hop;
+    short hop;
     int64_t row_num;
     int64_t col_num;
     int64_t data_num;
@@ -202,7 +203,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //        else if (!sharedRes[0])
 //            continue;
         // run task, same block threads have same task(hop_num, row_num)
-        const int hop_num = blockTask[0];
+        const short hop_num = blockTask[0];
         const int64_t row = blockTask[1];
         const int64_t in_row_start = in_ptr[row];
         const int64_t deg = in_ptr[row + 1] - in_row_start;
@@ -616,6 +617,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     stdgpu::bitset<>::destroyDeviceObject(bits);
 
     // 传多个COO res的row, col, idx的指针的指针，用res_vector取fill，逻辑上最直观. 传指针的指针要写个demo试一下
+    nvtxRangePushA("get result");
     auto range_vec = res_vector.device_range();
     std::vector<COOMatrix> ret_coo(hops);
 //    cudaPointerAttributes attributes;
@@ -664,6 +666,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         picked_indices[i] = picked_indices[i].CreateView({new_size}, picked_indices[i]->dtype);
         ret_coo[i] = COOMatrix(mat.num_rows, mat.num_cols, picked_rows[i], picked_cols[i], picked_indices[i]);
     }
+    nvtxRangePop();
 
     stdgpu::vector<selectedEdgeInfo>::destroyDeviceObject(res_vector);
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
