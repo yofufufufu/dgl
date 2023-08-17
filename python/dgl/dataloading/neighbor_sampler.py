@@ -21,6 +21,7 @@ class TaskParallelismNeighborSampler(Sampler):
         blocks = []
         # DGL 的fanout是per layer的，所以这里要reverse一下
         # frontiers = g.sample_neighbors_task_parallelism(seed_nodes, list(reversed(self.fanouts)))
+        torch.cuda.nvtx.range_push("sample_neighbors_task_parallelism")
         frontiers = g.sample_neighbors_task_parallelism(seed_nodes, self.fanouts)
         for frontier in frontiers:
             # 注意block的顺序，到底是append还是insert(0)?
@@ -31,6 +32,7 @@ class TaskParallelismNeighborSampler(Sampler):
             blocks.insert(0, block)
             seed_nodes = block.srcdata[NID]
         input_nodes = blocks[0].srcdata[NID]
+        torch.cuda.nvtx.range_pop();
         return input_nodes, output_nodes, blocks
 
 
@@ -171,6 +173,7 @@ class NeighborSampler(BlockSampler):
     def sample_blocks(self, g, seed_nodes, exclude_eids=None):
         output_nodes = seed_nodes
         blocks = []
+        torch.cuda.nvtx.range_push("DGL sample_neighbors")
         for fanout in reversed(self.fanouts):
             frontier = g.sample_neighbors(
                 seed_nodes,
@@ -187,6 +190,7 @@ class NeighborSampler(BlockSampler):
             block.edata[EID] = eid
             seed_nodes = block.srcdata[NID]
             blocks.insert(0, block)
+        torch.cuda.nvtx.range_pop()
 
         return seed_nodes, output_nodes, blocks
 
