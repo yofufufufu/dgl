@@ -144,13 +144,18 @@ struct HopTrans : public thrust::unary_function<selectedEdgeInfo, int> {
     }
 };
 
-
 // should try to push the node with more edges first
-__global__ void queue_init(
-        stdgpu::queue<thrust::pair<short, int64_t>> queue, const int64_t* const in_rows, const int64_t num_rows){
+__global__ void queue_bits_init(
+        stdgpu::queue<thrust::pair<short, int64_t>> queue, const int64_t* const in_rows, const int64_t num_rows
+        , bool first_time, stdgpu::bitset<> bits){
     const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
     if (tIdx < num_rows) {
         queue.push({1, in_rows[tIdx]});
+    }
+    if (!first_time) {
+        for (int i = tIdx; i < bits.size(); i += gridDim.x * blockDim.x){
+            bits.reset(i);
+        }
     }
 }
 
@@ -533,6 +538,7 @@ COOMatrix CSRRowWiseSamplingUniform(
 }
 
 stdgpu::vector<selectedEdgeInfo> res_vector;
+stdgpu::bitset<> bits;
 //stdgpu::queue<thrust::pair<short, int64_t>> task_queue;
 const int RES_VEC_CAP = 1e8;
 stdgpu::index_t vector_cap;
@@ -551,16 +557,6 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const int64_t num_rows = rows->shape[0];
     const auto hops = num_picks->shape[0];
 
-//    int64_t * d_num_picks = static_cast<int64_t *>(device->AllocWorkspace(ctx, hops * sizeof(int64_t)));
-    // res num per hop
-
-//    cudaEvent_t copyEvent;
-//    CUDA_CALL(cudaEventCreate(&copyEvent));
-//    device->CopyDataFromTo(
-//            num_picks.data(), 0, d_num_picks, 0, hops * sizeof(int64_t),
-//            DGLContext{kDGLCPU, 0}, ctx, mat.indptr->dtype);
-//    CUDA_CALL(cudaEventRecord(copyEvent, stream));
-
     // rows(i.e. batch nodes id) static cast to int64_t array, also a device ptr
     const int64_t* const sliced_rows = static_cast<const int64_t*>(rows->data);
 
@@ -575,10 +571,6 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
                           : nullptr;
     const int64_t* num_picks_ptr = static_cast<int64_t*>(GetDevicePointer(num_picks));
 
-    nvtxRangePushA("create bits");
-    auto bits = stdgpu::bitset<>::createDeviceObject(static_cast<stdgpu::index_t>(mat.num_rows * (hops - 1)));
-    nvtxRangePop();
-
     // allocate space for stdgpu container
     stdgpu::index_t queue_cap = num_rows;
     // last hop sample result do not need to enqueue
@@ -591,19 +583,24 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     // init
     const dim3 init_block(512);
-    const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
-    CUDA_KERNEL_CALL((queue_init), init_grid, init_block, 0, stream, task_queue, sliced_rows, num_rows);
+//    const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
+    const dim3 init_grid((mat.num_rows * (hops - 1) + init_block.x - 1) / init_block.x);
+    CUDA_KERNEL_CALL((queue_bits_init), init_grid, init_block, 0, stream, task_queue, sliced_rows, num_rows, first_time, bits);
 //    assert(task_queue.size() == num_rows);
 
-    nvtxRangePushA("create or clear res_vector");
+    nvtxRangePushA("create or clear container");
     if (first_time) {
         vector_cap = num_rows * num_picks_vec[0];
         // last hop sample result need to push into result vector
         for (int i = 1; i < hops; i++)
             // the dstnodes of current hop should be the srcnodes of next hop
             vector_cap += vector_cap * (num_picks_vec[i] + 1);
-
         res_vector = stdgpu::vector<selectedEdgeInfo>::createDeviceObject(RES_VEC_CAP);
+
+        nvtxRangePushA("create bits");
+        bits = stdgpu::bitset<>::createDeviceObject(static_cast<stdgpu::index_t>(mat.num_rows * (hops - 1)));
+        nvtxRangePop();
+
         first_time = false;
     }
         // task queue will be "clear" when sample kernel finished
@@ -620,18 +617,11 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const uint64_t random_seed = 1234;
 
     const dim3 block(BLOCK_SIZE);
-//    const dim3 block(32);
     // should gird num be max?
     // best performance:arxiv, [25,10]
     const dim3 grid(num_rows);
 //    const dim3 grid(1);
 
-    // wait for copying `d_num_picks` to finish
-//    CUDA_CALL(cudaEventSynchronize(copyEvent));
-//    CUDA_CALL(cudaEventDestroy(copyEvent));
-//    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, (hops - 1) * sizeof(int64_t), stream,
-//                     random_seed, num_picks_ptr, d_res_num, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
-//                     task_queue, set, res_vector);
 
 //    std::printf("queue valid:%d\n", task_queue.valid());
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
@@ -654,10 +644,20 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     }
     nvtxRangePop();
 
-    auto range_vec = res_vector.device_range();
     std::vector<COOMatrix> ret_coo(hops);
+
+    auto range_vec = res_vector.device_range();
+    auto zip_begin = thrust::make_zip_iterator(thrust::make_tuple(
+            thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
+            thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
+            thrust::make_transform_iterator(range_vec.begin(), DataTrans())
+    ));
+    auto zip_end = thrust::make_zip_iterator(thrust::make_tuple(
+            thrust::make_transform_iterator(range_vec.end(), RowTrans()),
+            thrust::make_transform_iterator(range_vec.end(), ColTrans()),
+            thrust::make_transform_iterator(range_vec.end(), DataTrans())
+    ));
 //    cudaPointerAttributes attributes;
-//    std::printf("result vector size: %ld\n", res_vector.size());
     for(int i = 0; i < hops; i++) {
         auto out_rows = static_cast<int64_t*>(picked_rows[i]->data);
         auto out_cols = static_cast<int64_t*>(picked_cols[i]->data);
@@ -668,16 +668,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //        {
 //            std::cout << "Device pointer is a valid device pointer." << std::endl;
 //        }
-        auto zip_begin = thrust::make_zip_iterator(thrust::make_tuple(
-                thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
-                thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
-                thrust::make_transform_iterator(range_vec.begin(), DataTrans())
-        ));
-        auto zip_end = thrust::make_zip_iterator(thrust::make_tuple(
-                thrust::make_transform_iterator(range_vec.end(), RowTrans()),
-                thrust::make_transform_iterator(range_vec.end(), ColTrans()),
-                thrust::make_transform_iterator(range_vec.end(), DataTrans())
-        ));
+
         auto zip_res = thrust::make_zip_iterator(thrust::make_tuple(
                 out_rows,
                 out_cols,
@@ -710,7 +701,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    nvtxRangePop();
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
     stdgpu::queue<thrust::pair<short, int64_t>>::destroyDeviceObject(task_queue);
-    stdgpu::bitset<>::destroyDeviceObject(bits);
+//    stdgpu::bitset<>::destroyDeviceObject(bits);
     return ret_coo;
 }
 
