@@ -146,17 +146,10 @@ struct HopTrans : public thrust::unary_function<selectedEdgeInfo, int> {
 
 // should try to push the node with more edges first
 __global__ void queue_bits_init(
-        stdgpu::queue<thrust::pair<short, int64_t>> queue, const int64_t* const in_rows, const int64_t num_rows
-        , bool first_time, stdgpu::bitset<> bits){
+        stdgpu::queue<thrust::pair<short, int64_t>> queue, const int64_t* const in_rows, const int64_t num_rows){
     const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
     if (tIdx < num_rows) {
         queue.push({1, in_rows[tIdx]});
-    }
-    if (!first_time) {
-        for (int i = tIdx; i < bits.size(); i += gridDim.x * blockDim.x) {
-            if (bits.test(i))
-                bits.reset(i);
-        }
     }
 }
 
@@ -164,7 +157,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         const uint64_t rand_seed, const int64_t * num_picks, const int64_t * const in_rows, const int64_t num_rows, const int hops,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
         stdgpu::queue<thrust::pair<short, int64_t>> task_queue,
-        stdgpu::bitset<> bits,
+        uint* bits,
         stdgpu::vector<selectedEdgeInfo> result
         ) {
     __shared__ int64_t blockTask[2];
@@ -223,8 +216,9 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
                 // last hop don't need to push task
                 if (hop_num < hops) {
-                    if (!bits.test(in_index[in_idx] * hop_num)){
-                        auto old = bits.set(in_index[in_idx] * hop_num);
+                    if (!bits[in_index[in_idx] * hop_num]) {
+//                        auto old = bits.set(in_index[in_idx] * hop_num);
+                        auto old = atomicOr(&bits[in_index[in_idx] * hop_num], 1);
                         if (!old) {
                             task_queue.push({hop_num + 1, in_index[in_idx]});
                         }
@@ -255,8 +249,8 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
                 // last hop don't need to push task
                 if (hop_num < hops) {
-                    if (!bits.test(in_index[perm_idx] * hop_num)){
-                        auto old = bits.set(in_index[perm_idx] * hop_num);
+                    if (!bits[in_index[perm_idx] * hop_num]) {
+                        auto old = atomicOr(&bits[in_index[perm_idx] * hop_num], 1);
                         if (!old) {
                             task_queue.push({hop_num + 1, in_index[perm_idx]});
                         }
@@ -266,8 +260,8 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         }
         // push self
         if (threadIdx.x == 0 && hop_num < hops) {
-            if (!bits.test(in_index[row] * hop_num)){
-                auto old = bits.set(in_index[row] * hop_num);
+            if (!bits[in_index[row] * hop_num]) {
+                auto old = atomicOr(&bits[in_index[row] * hop_num], 1);
                 if (!old) {
                     task_queue.push({hop_num + 1, row});
                 }
@@ -539,7 +533,6 @@ COOMatrix CSRRowWiseSamplingUniform(
 }
 
 stdgpu::vector<selectedEdgeInfo> res_vector;
-stdgpu::bitset<> bits;
 //stdgpu::queue<thrust::pair<short, int64_t>> task_queue;
 const int RES_VEC_CAP = 1e8;
 stdgpu::index_t vector_cap;
@@ -584,9 +577,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     // init
     const dim3 init_block(512);
-//    const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
-    const dim3 init_grid((mat.num_rows * (hops - 1) + init_block.x - 1) / init_block.x);
-    CUDA_KERNEL_CALL((queue_bits_init), init_grid, init_block, 0, stream, task_queue, sliced_rows, num_rows, first_time, bits);
+    const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
+//    const dim3 init_grid((mat.num_rows * (hops - 1) + init_block.x - 1) / init_block.x);
+    CUDA_KERNEL_CALL((queue_bits_init), init_grid, init_block, 0, stream, task_queue, sliced_rows, num_rows);
 //    assert(task_queue.size() == num_rows);
 
     nvtxRangePushA("create or clear container");
@@ -598,9 +591,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
             vector_cap += vector_cap * (num_picks_vec[i] + 1);
         res_vector = stdgpu::vector<selectedEdgeInfo>::createDeviceObject(RES_VEC_CAP);
 
-        nvtxRangePushA("create bits");
-        bits = stdgpu::bitset<>::createDeviceObject(static_cast<stdgpu::index_t>(mat.num_rows * (hops - 1)));
-        nvtxRangePop();
+//        nvtxRangePushA("create bits");
+//        bits = stdgpu::bitset<>::createDeviceObject(static_cast<stdgpu::index_t>(mat.num_rows * (hops - 1)));
+//        nvtxRangePop();
 
         first_time = false;
     }
@@ -623,11 +616,15 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const dim3 grid(num_rows);
 //    const dim3 grid(1);
 
+    nvtxRangePushA("create bits");
+    uint* bool_arr = static_cast<uint *>(device->AllocWorkspace(ctx, mat.num_rows * (hops - 1) * sizeof(uint)));
+    CUDA_CALL(cudaMemset(bool_arr, 0, mat.num_rows * (hops - 1) * sizeof(uint)));
+    nvtxRangePop();
 
 //    std::printf("queue valid:%d\n", task_queue.valid());
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
                      random_seed, num_picks_ptr, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
-                     task_queue, bits, res_vector);
+                     task_queue, bool_arr, res_vector);
 //    std::printf("queue valid:%d\n", task_queue.valid());
 //    assert(task_queue.empty());
 //    std::printf("cuda kernel finished\n");
@@ -701,6 +698,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    stdgpu::vector<selectedEdgeInfo>::destroyDeviceObject(res_vector);
 //    nvtxRangePop();
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
+    device->FreeWorkspace(ctx, bool_arr);
     stdgpu::queue<thrust::pair<short, int64_t>>::destroyDeviceObject(task_queue);
 //    stdgpu::bitset<>::destroyDeviceObject(bits);
     return ret_coo;
