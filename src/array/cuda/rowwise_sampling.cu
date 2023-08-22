@@ -153,8 +153,9 @@ __global__ void queue_bits_init(
         queue.push({1, in_rows[tIdx]});
     }
     if (!first_time) {
-        for (int i = tIdx; i < bits.size(); i += gridDim.x * blockDim.x){
-            bits.reset(i);
+        for (int i = tIdx; i < bits.size(); i += gridDim.x * blockDim.x) {
+            if (bits.test(i))
+                bits.reset(i);
         }
     }
 }
