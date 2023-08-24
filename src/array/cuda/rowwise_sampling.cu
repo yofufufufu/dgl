@@ -145,16 +145,24 @@ struct HopTrans : public thrust::unary_function<selectedEdgeInfo, int> {
 };
 
 // should try to push the node with more edges first
-__global__ void queue_bits_init(
-        stdgpu::queue<thrust::pair<short, int64_t>> queue, const int64_t* const in_rows, const int64_t num_rows){
+__global__ void queue_init(
+        stdgpu::queue<thrust::pair<short, int64_t>> queue, uint* bits, const int64_t* const in_rows,
+        const int64_t num_rows, const int hops, const int64_t total_num_rows) {
     const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
+//    if (tIdx < num_rows * hops) {
+//        int hop_num = 1 + tIdx / num_rows;
+//        queue.push({hop_num, in_rows[tIdx % num_rows]});
+//        if (hop_num > 1)
+//            bits[in_rows[tIdx % num_rows] + total_num_rows * (hop_num - 2)] = 1;
+//    }
     if (tIdx < num_rows) {
         queue.push({1, in_rows[tIdx]});
     }
 }
 
 __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
-        const uint64_t rand_seed, const int64_t * num_picks, const int64_t * const in_rows, const int64_t num_rows, const int hops,
+        const uint64_t rand_seed, const int64_t * num_picks, const int64_t * const in_rows,
+        const int64_t num_rows, const int hops, const int64_t total_num_rows,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
         stdgpu::queue<thrust::pair<short, int64_t>> task_queue,
         uint* bits,
@@ -216,9 +224,9 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
                 // last hop don't need to push task
                 if (hop_num < hops) {
-                    if (!bits[in_index[in_idx] * hop_num]) {
+                    if (!bits[in_index[in_idx] + total_num_rows * (hop_num - 1)]) {
 //                        auto old = bits.set(in_index[in_idx] * hop_num);
-                        auto old = atomicOr(&bits[in_index[in_idx] * hop_num], 1);
+                        auto old = atomicOr(&bits[in_index[in_idx] + total_num_rows * (hop_num - 1)], 1);
                         if (!old) {
                             task_queue.push({hop_num + 1, in_index[in_idx]});
                         }
@@ -249,8 +257,8 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
                 // last hop don't need to push task
                 if (hop_num < hops) {
-                    if (!bits[in_index[perm_idx] * hop_num]) {
-                        auto old = atomicOr(&bits[in_index[perm_idx] * hop_num], 1);
+                    if (!bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)]) {
+                        auto old = atomicOr(&bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)], 1);
                         if (!old) {
                             task_queue.push({hop_num + 1, in_index[perm_idx]});
                         }
@@ -260,8 +268,8 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         }
         // push self
         if (threadIdx.x == 0 && hop_num < hops) {
-            if (!bits[in_index[row] * hop_num]) {
-                auto old = atomicOr(&bits[in_index[row] * hop_num], 1);
+            if (!bits[row + total_num_rows * (hop_num - 1)]) {
+                auto old = atomicOr(&bits[row + total_num_rows * (hop_num - 1)], 1);
                 if (!old) {
                     task_queue.push({hop_num + 1, row});
                 }
@@ -575,11 +583,16 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     auto task_queue = stdgpu::queue<thrust::pair<short, int64_t>>::createDeviceObject(queue_cap);
     nvtxRangePop();
 
+    nvtxRangePushA("create bits");
+    uint* bool_arr = static_cast<uint *>(device->AllocWorkspace(ctx, mat.num_rows * (hops - 1) * sizeof(uint)));
+    CUDA_CALL(cudaMemset(bool_arr, 0, mat.num_rows * (hops - 1) * sizeof(uint)));
+    nvtxRangePop();
+
     // init
     const dim3 init_block(512);
     const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
-//    const dim3 init_grid((mat.num_rows * (hops - 1) + init_block.x - 1) / init_block.x);
-    CUDA_KERNEL_CALL((queue_bits_init), init_grid, init_block, 0, stream, task_queue, sliced_rows, num_rows);
+//    const dim3 init_grid((num_rows * hops + init_block.x - 1) / init_block.x);
+    CUDA_KERNEL_CALL((queue_init), init_grid, init_block, 0, stream, task_queue, bool_arr, sliced_rows, num_rows, hops, mat.num_rows);
 //    assert(task_queue.size() == num_rows);
 
     nvtxRangePushA("create or clear container");
@@ -617,16 +630,12 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     // should gird num be max?
     // best performance:arxiv, [25,10]
     const dim3 grid(num_rows);
+//    const dim3 grid(num_rows * hops);
 //    const dim3 grid(1);
-
-    nvtxRangePushA("create bits");
-    uint* bool_arr = static_cast<uint *>(device->AllocWorkspace(ctx, mat.num_rows * (hops - 1) * sizeof(uint)));
-    CUDA_CALL(cudaMemset(bool_arr, 0, mat.num_rows * (hops - 1) * sizeof(uint)));
-    nvtxRangePop();
 
 //    std::printf("queue valid:%d\n", task_queue.valid());
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
-                     random_seed, num_picks_ptr, sliced_rows, num_rows, hops, in_ptr, in_cols, data,
+                     random_seed, num_picks_ptr, sliced_rows, num_rows, hops, mat.num_rows, in_ptr, in_cols, data,
                      task_queue, bool_arr, res_vector);
 //    std::printf("queue valid:%d\n", task_queue.valid());
 //    assert(task_queue.empty());
