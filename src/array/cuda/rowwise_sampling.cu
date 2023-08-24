@@ -535,7 +535,7 @@ COOMatrix CSRRowWiseSamplingUniform(
 stdgpu::vector<selectedEdgeInfo> res_vector;
 //stdgpu::queue<thrust::pair<short, int64_t>> task_queue;
 const int RES_VEC_CAP = 1e8;
-stdgpu::index_t vector_cap;
+stdgpu::index_t vector_cap = 0;
 bool first_time = true;
 int64_t old_size = 0;
 
@@ -584,11 +584,14 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     nvtxRangePushA("create or clear container");
     if (first_time) {
-        vector_cap = num_rows * num_picks_vec[0];
+        int64_t node_num = num_rows;
+//        vector_cap = num_rows * num_picks_vec[0];
         // last hop sample result need to push into result vector
-        for (int i = 1; i < hops; i++)
+        for (int i = 0; i < hops; i++) {
             // the dstnodes of current hop should be the srcnodes of next hop
-            vector_cap += vector_cap * (num_picks_vec[i] + 1);
+            vector_cap += node_num * num_picks_vec[i];
+            node_num += vector_cap;
+        }
         res_vector = stdgpu::vector<selectedEdgeInfo>::createDeviceObject(RES_VEC_CAP);
 
 //        nvtxRangePushA("create bits");
@@ -631,14 +634,14 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     // 传多个COO res的row, col, idx的指针的指针，用res_vector取fill，逻辑上最直观. 传指针的指针要写个demo试一下
     nvtxRangePushA("get result");
-    int64_t hop_res_num = num_rows * num_picks_vec[0];
+    int64_t node_num = num_rows;
     nvtxRangePushA("NewIdArray");
     for(int i = 0; i < hops; i++) {
-        if (i < hops - 1)
-            hop_res_num = hop_res_num * (num_picks_vec[i + 1] + 1);
+        int64_t hop_res_num = node_num * num_picks_vec[i];
         picked_rows[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
         picked_cols[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
         picked_indices[i] = NewIdArray(hop_res_num, ctx, sizeof(int64_t) * 8);
+        node_num += hop_res_num;
     }
     nvtxRangePop();
 
