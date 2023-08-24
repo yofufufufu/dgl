@@ -32,7 +32,7 @@ class TaskParallelismNeighborSampler(Sampler):
             blocks.insert(0, block)
             seed_nodes = block.srcdata[NID]
         input_nodes = blocks[0].srcdata[NID]
-        torch.cuda.nvtx.range_pop();
+        torch.cuda.nvtx.range_pop()
         return input_nodes, output_nodes, blocks
 
 
