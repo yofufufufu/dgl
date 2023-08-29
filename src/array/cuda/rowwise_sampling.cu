@@ -146,7 +146,7 @@ struct HopTrans : public thrust::unary_function<selectedEdgeInfo, int> {
 
 // should try to push the node with more edges first
 __global__ void queue_init(
-        stdgpu::queue<thrust::pair<short, int64_t>> queue, uint* bits, const int64_t* const in_rows,
+        thrust::pair<short, int64_t>* queue, uint* bits, const int64_t* const in_rows,
         const int64_t num_rows, const int hops, const int64_t total_num_rows) {
     const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
 //    if (tIdx < num_rows * hops) {
@@ -156,15 +156,17 @@ __global__ void queue_init(
 //            bits[in_rows[tIdx % num_rows] + total_num_rows * (hop_num - 2)] = 1;
 //    }
     if (tIdx < num_rows) {
-        queue.push({1, in_rows[tIdx]});
+        queue[tIdx] = {1, in_rows[tIdx]};
     }
 }
 
+__device__ uint task_index;
+__device__ uint tail_index;
 __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         const uint64_t rand_seed, const int64_t * num_picks, const int64_t * const in_rows,
         const int64_t num_rows, const int hops, const int64_t total_num_rows,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
-        stdgpu::queue<thrust::pair<short, int64_t>> task_queue,
+        thrust::pair<short, int64_t>* task_queue,
         uint* bits,
         stdgpu::vector<selectedEdgeInfo> result
         ) {
@@ -186,19 +188,30 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
     // different block has different seed
     // different thread in block has different (sub)sequence
     curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
-//    curand_init(rand_seed, 0, 0, &rng);
 
     while (true) {
         if (threadIdx.x == 0) {
-            auto pop_res = task_queue.pop();
-            sharedRes[0] = pop_res.second;
-            if (pop_res.second) {
-                auto task = pop_res.first;
-                // hop num
-                blockTask[0] = task.first;
-                // row_num
-                blockTask[1] = task.second;
-            }
+//            if (task_index < tail_index) {
+                auto index = atomicAdd(&task_index, 1);
+                // although `tail_index` may change anytime, if `index < tail_index`, then ok
+                if (index < tail_index) {
+                    sharedRes[0] = true;
+                    auto task = task_queue[index];
+                    // hop num
+                    blockTask[0] = task.first;
+                    // row_num
+                    blockTask[1] = task.second;
+                } else {
+                    sharedRes[0] = false;
+                    // if `tail_index` is changed(push) before `atomicExch`, then some nodes may not be popped
+                    // `atomicMin` can solve? no
+                    atomicExch(&task_index, tail_index);
+                }
+//            }
+//            else {
+//                sharedRes[0] = false;
+//                atomicExch(&task_index, tail_index);
+//            }
         }
         __syncthreads();
 //        if (!sharedRes[0] && task_queue.empty())
@@ -228,7 +241,8 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //                        auto old = bits.set(in_index[in_idx] * hop_num);
                         auto old = atomicOr(&bits[in_index[in_idx] + total_num_rows * (hop_num - 1)], 1);
                         if (!old) {
-                            task_queue.push({hop_num + 1, in_index[in_idx]});
+                            auto tail = atomicAdd(&tail_index, 1);
+                            task_queue[tail] = {hop_num + 1, in_index[in_idx]};
                         }
                     }
                 }
@@ -260,7 +274,8 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
                     if (!bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)]) {
                         auto old = atomicOr(&bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)], 1);
                         if (!old) {
-                            task_queue.push({hop_num + 1, in_index[perm_idx]});
+                            auto tail = atomicAdd(&tail_index, 1);
+                            task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
                         }
                     }
                 }
@@ -271,11 +286,12 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
             if (!bits[row + total_num_rows * (hop_num - 1)]) {
                 auto old = atomicOr(&bits[row + total_num_rows * (hop_num - 1)], 1);
                 if (!old) {
-                    task_queue.push({hop_num + 1, row});
+                    auto tail = atomicAdd(&tail_index, 1);
+                    task_queue[tail] = {hop_num + 1, row};
                 }
             }
         }
-//        __syncthreads();
+        __syncthreads();
     }
 }
 
@@ -580,7 +596,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         queue_cap += queue_cap * (num_picks_vec[i] + 1);
     // pair(hop_num, src_node_id)
     nvtxRangePushA("create task_queue");
-    auto task_queue = stdgpu::queue<thrust::pair<short, int64_t>>::createDeviceObject(queue_cap);
+//    auto task_queue = stdgpu::queue<thrust::pair<short, int64_t>>::createDeviceObject(queue_cap);
+    auto task_queue = static_cast<thrust::pair<short, int64_t> *>(device->AllocWorkspace(ctx, queue_cap * sizeof(thrust::pair<short, int64_t>)));
     nvtxRangePop();
 
     nvtxRangePushA("create bits");
@@ -634,6 +651,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    const dim3 grid(1);
 
 //    std::printf("queue valid:%d\n", task_queue.valid());
+    uint index_init = 0, tail_init = num_rows;
+    CUDA_CALL(cudaMemcpyToSymbol(task_index, &index_init, sizeof(uint)));
+    CUDA_CALL(cudaMemcpyToSymbol(tail_index, &tail_init, sizeof(uint)));
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
                      random_seed, num_picks_ptr, sliced_rows, num_rows, hops, mat.num_rows, in_ptr, in_cols, data,
                      task_queue, bool_arr, res_vector);
@@ -711,7 +731,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    nvtxRangePop();
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
     device->FreeWorkspace(ctx, bool_arr);
-    stdgpu::queue<thrust::pair<short, int64_t>>::destroyDeviceObject(task_queue);
+    device->FreeWorkspace(ctx, task_queue);
+//    stdgpu::queue<thrust::pair<short, int64_t>>::destroyDeviceObject(task_queue);
 //    stdgpu::bitset<>::destroyDeviceObject(bits);
     return ret_coo;
 }
