@@ -160,13 +160,14 @@ __global__ void queue_init(
     }
 }
 
+__device__ uint vector_tail;
 __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         const uint64_t rand_seed, const int64_t * num_picks, const int64_t * const in_rows,
         const int64_t num_rows, const int hops, const int64_t total_num_rows,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
         stdgpu::queue<thrust::pair<short, int64_t>> task_queue,
         uint* bits,
-        stdgpu::vector<selectedEdgeInfo> result
+        selectedEdgeInfo* result
         ) {
     __shared__ int64_t blockTask[2];
     __shared__ bool sharedRes[1];
@@ -220,7 +221,9 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
             // just copy row when there is not enough nodes to sample
             for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
                 const int64_t in_idx = in_row_start + idx;
-                result.push_back({hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx});
+                auto index = atomicAdd(&vector_tail, 1);
+                // TODO: can this atomic operation be optimized?
+                result[index] = {hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx};
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
                 // last hop don't need to push task
                 if (hop_num < hops) {
@@ -253,7 +256,8 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
             for (int idx = threadIdx.x; idx < num_picks[hop_num - 1]; idx += BLOCK_SIZE) {
                 // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
                 const int64_t perm_idx = permList[idx] + in_row_start;
-                result.push_back({hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx});
+                auto index = atomicAdd(&vector_tail, 1);
+                result[index] = {hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx};
 //                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
                 // last hop don't need to push task
                 if (hop_num < hops) {
@@ -540,12 +544,12 @@ COOMatrix CSRRowWiseSamplingUniform(
   }
 }
 
-stdgpu::vector<selectedEdgeInfo> res_vector;
-//stdgpu::queue<thrust::pair<short, int64_t>> task_queue;
-const int RES_VEC_CAP = 1e8;
-stdgpu::index_t vector_cap = 0;
-bool first_time = true;
-int64_t old_size = 0;
+//stdgpu::vector<selectedEdgeInfo> res_vector;
+////stdgpu::queue<thrust::pair<short, int64_t>> task_queue;
+//const int RES_VEC_CAP = 1e8;
+//stdgpu::index_t vector_cap = 0;
+//bool first_time = true;
+//int64_t old_size = 0;
 
 std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         CSRMatrix mat, IdArray rows, const IdArray &num_picks) {
@@ -596,30 +600,16 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    assert(task_queue.size() == num_rows);
 
     nvtxRangePushA("create or clear container");
-    if (first_time) {
-        int64_t node_num = num_rows;
-//        vector_cap = num_rows * num_picks_vec[0];
-        // last hop sample result need to push into result vector
-        for (int i = 0; i < hops; i++) {
-            // the dstnodes of current hop should be the srcnodes of next hop
-            vector_cap += node_num * num_picks_vec[i];
-            node_num += vector_cap;
-        }
-        res_vector = stdgpu::vector<selectedEdgeInfo>::createDeviceObject(RES_VEC_CAP);
-
-//        nvtxRangePushA("create bits");
-//        bits = stdgpu::bitset<>::createDeviceObject(static_cast<stdgpu::index_t>(mat.num_rows * (hops - 1)));
-//        nvtxRangePop();
-
-        first_time = false;
+    int64_t node_num = num_rows;
+    int64_t vector_cap = 0;
+    // last hop sample result need to push into result vector
+    for (int i = 0; i < hops; i++) {
+        // the dstnodes of current hop should be the srcnodes of next hop
+        vector_cap += node_num * num_picks_vec[i];
+        node_num += vector_cap;
     }
-        // task queue will be "clear" when sample kernel finished
-    else{
-        if (old_size + vector_cap >= RES_VEC_CAP){
-            res_vector.clear();
-            old_size = 0;
-        }
-    }
+    //TODO: SoA maybe better than AoS? may do not need to use thrust::copy_if if SoA?
+    selectedEdgeInfo* res_vector = static_cast<selectedEdgeInfo *>(device->AllocWorkspace(ctx, vector_cap * sizeof(selectedEdgeInfo)));
     nvtxRangePop();
 
 //    const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
@@ -633,17 +623,17 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    const dim3 grid(num_rows * hops);
 //    const dim3 grid(1);
 
-//    std::printf("queue valid:%d\n", task_queue.valid());
+    uint vector_len = 0;
+    CUDA_CALL(cudaMemcpyToSymbol(vector_tail, &vector_len, sizeof(uint)));
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
                      random_seed, num_picks_ptr, sliced_rows, num_rows, hops, mat.num_rows, in_ptr, in_cols, data,
                      task_queue, bool_arr, res_vector);
-//    std::printf("queue valid:%d\n", task_queue.valid());
 //    assert(task_queue.empty());
 //    std::printf("cuda kernel finished\n");
 
     // 传多个COO res的row, col, idx的指针的指针，用res_vector取fill，逻辑上最直观. 传指针的指针要写个demo试一下
     nvtxRangePushA("get result");
-    int64_t node_num = num_rows;
+    node_num = num_rows;
     nvtxRangePushA("NewIdArray");
     for(int i = 0; i < hops; i++) {
         int64_t hop_res_num = node_num * num_picks_vec[i];
@@ -654,18 +644,19 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     }
     nvtxRangePop();
 
+    CUDA_CALL(cudaMemcpyFromSymbol(&vector_len, vector_tail, sizeof(uint), 0, cudaMemcpyDeviceToHost));
     std::vector<COOMatrix> ret_coo(hops);
 
-    auto range_vec = res_vector.device_range();
+//    auto range_vec = res_vector.device_range();
     auto zip_begin = thrust::make_zip_iterator(thrust::make_tuple(
-            thrust::make_transform_iterator(range_vec.begin(), RowTrans()),
-            thrust::make_transform_iterator(range_vec.begin(), ColTrans()),
-            thrust::make_transform_iterator(range_vec.begin(), DataTrans())
+            thrust::make_transform_iterator(res_vector, RowTrans()),
+            thrust::make_transform_iterator(res_vector, ColTrans()),
+            thrust::make_transform_iterator(res_vector, DataTrans())
     ));
     auto zip_end = thrust::make_zip_iterator(thrust::make_tuple(
-            thrust::make_transform_iterator(range_vec.end(), RowTrans()),
-            thrust::make_transform_iterator(range_vec.end(), ColTrans()),
-            thrust::make_transform_iterator(range_vec.end(), DataTrans())
+            thrust::make_transform_iterator(res_vector + vector_len, RowTrans()),
+            thrust::make_transform_iterator(res_vector + vector_len, ColTrans()),
+            thrust::make_transform_iterator(res_vector + vector_len, DataTrans())
     ));
 //    cudaPointerAttributes attributes;
     for(int i = 0; i < hops; i++) {
@@ -686,9 +677,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         ));
         int64_t new_size = thrust::copy_if(
                 thrust::device,
-                zip_begin + old_size,
+                zip_begin,
                 zip_end,
-                thrust::make_transform_iterator(range_vec.begin() + old_size, HopTrans()),
+                thrust::make_transform_iterator(res_vector, HopTrans()),
                 zip_res,
                 CheckHopNum(i + 1)
                 ) - zip_res;
@@ -703,16 +694,13 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     }
     nvtxRangePop();
 
-    old_size = res_vector.size();
-
-//    nvtxRangePushA("free res_vector");
-    //TODO: should free them once when program ends(last iteration)... but I have not found an easy way to do that.
-//    stdgpu::vector<selectedEdgeInfo>::destroyDeviceObject(res_vector);
-//    nvtxRangePop();
-//    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
+    nvtxRangePushA("free container");
     device->FreeWorkspace(ctx, bool_arr);
+    device->FreeWorkspace(ctx, res_vector);
     stdgpu::queue<thrust::pair<short, int64_t>>::destroyDeviceObject(task_queue);
-//    stdgpu::bitset<>::destroyDeviceObject(bits);
+    nvtxRangePop();
+
+//    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
     return ret_coo;
 }
 
