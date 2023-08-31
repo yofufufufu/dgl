@@ -8,13 +8,6 @@
 #include <dgl/random.h>
 #include <dgl/runtime/device_api.h>
 
-#include <stdgpu/unordered_set.cuh>
-#include <stdgpu/bitset.cuh>
-#include <stdgpu/queue.cuh>
-#include <stdgpu/deque.cuh>
-#include <stdgpu/vector.cuh>
-
-#include <numeric>
 #include <nvtx3/nvToolsExt.h>
 
 #include "../../array/cuda/atomic.cuh"
@@ -113,8 +106,8 @@ struct selectedEdgeInfo {
 
 // should try to push the node with more edges first
 __global__ void queue_init(
-        stdgpu::queue<thrust::pair<short, int64_t>> queue, uint* bits, const int64_t* const in_rows,
-        const int64_t num_rows, const int hops, const int64_t total_num_rows) {
+        thrust::pair<short, int64_t>* queue, uint* bits, const int64_t* const in_rows,
+        const int64_t num_rows, const int hops, const int64_t total_num_rows, const int64_t queue_cap) {
     const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
 //    if (tIdx < num_rows * hops) {
 //        int hop_num = 1 + tIdx / num_rows;
@@ -123,19 +116,28 @@ __global__ void queue_init(
 //            bits[in_rows[tIdx % num_rows] + total_num_rows * (hop_num - 2)] = 1;
 //    }
     if (tIdx < num_rows) {
-        queue.push({1, in_rows[tIdx]});
+        queue[tIdx] = {1, in_rows[tIdx]};
+    }
+    // thread num > queue_cap, should restrict else condition
+    else if (tIdx < queue_cap){
+        // avoid read uninitialized value, which can cause strange error
+        queue[tIdx] = {0, -1};
     }
 }
 
+// must be volatile!
+__device__ volatile uint tail_index;
+__device__ volatile uint finished_block_num;
 __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         const uint64_t rand_seed, const int64_t * num_picks, uint* vector_lens, const int64_t * const in_rows,
         const int64_t num_rows, const int hops, const int64_t total_num_rows,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
-        stdgpu::queue<thrust::pair<short, int64_t>> task_queue,
+        // must be volatile!
+        volatile thrust::pair<short, int64_t>* task_queue,
         uint* bits,
         selectedEdgeInfo* result
         ) {
-    __shared__ int64_t blockTask[2];
+//    __shared__ int64_t blockTask[2];
     __shared__ bool sharedRes[1];
     // num_pick cannot be larger than 128
     // any better solution?
@@ -156,99 +158,128 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //    curand_init(rand_seed, 0, 0, &rng);
 
     while (true) {
-        if (threadIdx.x == 0) {
-            auto pop_res = task_queue.pop();
-            sharedRes[0] = pop_res.second;
-            if (pop_res.second) {
-                auto task = pop_res.first;
-                // hop num
-                blockTask[0] = task.first;
-                // row_num
-                blockTask[1] = task.second;
-            }
-        }
+        // writes to tail_index and finished_block_num is not visible(at least within a period of time) to other blocks
+        // if variables are not volatile, the value will be cached?
+        // so other blocks will loop infinite time in a very short time, which causes program hung.
+        // `printf` can change data visibility by some ways...
+        // see: https://forums.developer.nvidia.com/t/printf-in-cuda-kernel-changes-program-behavior/234524
+
+        if (threadIdx.x == 0)
+            sharedRes[0] = blockIdx.x < tail_index;
         __syncthreads();
-//        if (!sharedRes[0] && task_queue.empty())
-        if (!sharedRes[0])
+
+        if (sharedRes[0]) {
+            // run task, same block threads have same task(hop_num, row_num)
+//            if (threadIdx.x == 0)
+//                std::printf("block %d is working\n", blockIdx.x);
+            // write to task queue may not visible, so task will be init value, i.e.{0,0}
+            const short hop_num = task_queue[blockIdx.x].first;
+            const int64_t row = task_queue[blockIdx.x].second;
+            // just do again. (any better solution?)
+            if (hop_num == 0 || row == -1) {
+//                std::printf("hop_num: %d, row: %ld\n", hop_num, row);
+                __syncthreads();
+                continue;
+            }
+
+            const int64_t in_row_start = in_ptr[row];
+            const int64_t deg = in_ptr[row + 1] - in_row_start;
+            const int64_t num_pick = num_picks[hop_num - 1];
+
+            if (deg <= num_pick) {
+                // just copy row when there is not enough nodes to sample
+                for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
+                    const int64_t in_idx = in_row_start + idx;
+                    auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
+                    // TODO: can this atomic operation be optimized?
+                    result[hop_num - 1].rows[index] = row;
+                    result[hop_num - 1].cols[index] = in_index[in_idx];
+                    result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
+                    // last hop don't need to push task
+                    if (hop_num < hops) {
+                        if (!bits[in_index[in_idx] + total_num_rows * (hop_num - 1)]) {
+                            //  auto old = bits.set(in_index[in_idx] * hop_num);
+                            auto old = atomicOr(&bits[in_index[in_idx] + total_num_rows * (hop_num - 1)], 1);
+                            if (!old) {
+                                auto tail = atomicAdd((uint *)&tail_index, 1);
+                                task_queue[tail].first = hop_num + 1;
+                                task_queue[tail].second = in_index[in_idx];
+//                                task_queue[tail] = {hop_num + 1, in_index[in_idx]};
+                            }
+                        }
+                    }
+                }
+            } else {
+                // generate permutation list via reservoir algorithm
+                // reservoir init
+                for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE) {
+                    permList[idx] = idx;
+                }
+                __syncthreads();
+
+                for (int idx = num_pick + threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
+                    const int num = curand(&rng) % (idx + 1);
+                    if (num < num_pick) {
+                        // use shared memory, faster than DGL?
+                        AtomicMax(permList + num, idx);
+                    }
+                }
+                __syncthreads();
+
+                for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE) {
+                    // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
+                    const int64_t perm_idx = permList[idx] + in_row_start;
+                    auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
+                    result[hop_num - 1].rows[index] = row;
+                    result[hop_num - 1].cols[index] = in_index[perm_idx];
+                    result[hop_num - 1].datas[index] = data ? data[perm_idx] : perm_idx;
+                    // last hop don't need to push task
+                    if (hop_num < hops) {
+                        if (!bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)]) {
+                            auto old = atomicOr(&bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)], 1);
+                            if (!old) {
+                                auto tail = atomicAdd((uint *)&tail_index, 1);
+//                                task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
+                                task_queue[tail].first = hop_num + 1;
+                                task_queue[tail].second = in_index[perm_idx];
+                            }
+                        }
+                    }
+                }
+            }
+            // push self
+            if (threadIdx.x == 0 && hop_num < hops) {
+                if (!bits[row + total_num_rows * (hop_num - 1)]) {
+                    auto old = atomicOr(&bits[row + total_num_rows * (hop_num - 1)], 1);
+                    if (!old) {
+                        auto tail = atomicAdd((uint *)&tail_index, 1);
+//                        task_queue[tail] = {hop_num + 1, row};
+                        task_queue[tail].first = hop_num + 1;
+                        task_queue[tail].second = row;
+                    }
+                }
+            }
+            // enough blocks, every block loop once.
+            __syncthreads();
+            // must add?
+//            __threadfence_system();
+            if (threadIdx.x == 0)
+                atomicAdd((uint *)&finished_block_num, 1);
+//            __syncthreads();
             break;
-        // result.size() > num_rows * 5 just for test, should have a better check policy
-//        if (!sharedRes[0] && result.size() > num_rows * 5)
-//            break;
-//        else if (!sharedRes[0])
-//            continue;
-        // run task, same block threads have same task(hop_num, row_num)
-        const short hop_num = blockTask[0];
-        const int64_t row = blockTask[1];
-        const int64_t in_row_start = in_ptr[row];
-        const int64_t deg = in_ptr[row + 1] - in_row_start;
-
-        if (deg <= num_picks[hop_num - 1]) {
-//            std::printf("row: %ld, deg: %ld, num_picks: %ld\n", row, deg, num_picks[hop_num - 1]);
-            // just copy row when there is not enough nodes to sample
-            for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
-                const int64_t in_idx = in_row_start + idx;
-                auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
-                // TODO: can this atomic operation be optimized?
-                result[hop_num - 1].rows[index] = row;
-                result[hop_num - 1].cols[index] = in_index[in_idx];
-                result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
-//                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[in_idx], data ? data[in_idx] : in_idx);
-                // last hop don't need to push task
-                if (hop_num < hops) {
-                    if (!bits[in_index[in_idx] + total_num_rows * (hop_num - 1)]) {
-//                        auto old = bits.set(in_index[in_idx] * hop_num);
-                        auto old = atomicOr(&bits[in_index[in_idx] + total_num_rows * (hop_num - 1)], 1);
-                        if (!old) {
-                            task_queue.push({hop_num + 1, in_index[in_idx]});
-                        }
-                    }
-                }
-            }
-        } else {
-            // generate permutation list via reservoir algorithm
-            // reservoir init
-            for (int idx = threadIdx.x; idx < num_picks[hop_num - 1]; idx += BLOCK_SIZE) {
-                permList[idx] = idx;
+        }
+        else {
+            // blockidx.x >= tail_index
+            // finished_block_num must increase slower than tail_index
+            if (threadIdx.x == 0) {
+                sharedRes[0] = finished_block_num == tail_index;
             }
             __syncthreads();
-
-            for (int idx = num_picks[hop_num - 1] + threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
-                const int num = curand(&rng) % (idx + 1);
-                if (num < num_picks[hop_num - 1]) {
-                    // use shared memory, faster than DGL?
-                    AtomicMax(permList + num, idx);
-                }
-            }
-            __syncthreads();
-
-            for (int idx = threadIdx.x; idx < num_picks[hop_num - 1]; idx += BLOCK_SIZE) {
-                // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
-                const int64_t perm_idx = permList[idx] + in_row_start;
-                auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
-                result[hop_num - 1].rows[index] = row;
-                result[hop_num - 1].cols[index] = in_index[perm_idx];
-                result[hop_num - 1].datas[index] = data ? data[perm_idx] : perm_idx;
-//                std::printf("result push hop_num: %d, row: %ld, col: %ld, data: %ld\n", hop_num, row, in_index[perm_idx], data ? data[perm_idx] : perm_idx);
-                // last hop don't need to push task
-                if (hop_num < hops) {
-                    if (!bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)]) {
-                        auto old = atomicOr(&bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)], 1);
-                        if (!old) {
-                            task_queue.push({hop_num + 1, in_index[perm_idx]});
-                        }
-                    }
-                }
+            if (sharedRes[0]) {
+                break;
             }
         }
-        // push self
-        if (threadIdx.x == 0 && hop_num < hops) {
-            if (!bits[row + total_num_rows * (hop_num - 1)]) {
-                auto old = atomicOr(&bits[row + total_num_rows * (hop_num - 1)], 1);
-                if (!old) {
-                    task_queue.push({hop_num + 1, row});
-                }
-            }
-        }
+        // must add?
 //        __syncthreads();
     }
 }
@@ -541,13 +572,14 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const int64_t* num_picks_ptr = static_cast<int64_t*>(GetDevicePointer(num_picks));
 
     // allocate space for stdgpu container
-    stdgpu::index_t queue_cap = num_rows;
+    int64_t queue_cap = num_rows;
     // last hop sample result do not need to enqueue
     for (int i = 0; i < hops - 1; i++)
         queue_cap += queue_cap * (num_picks_vec[i] + 1);
     // pair(hop_num, src_node_id)
     nvtxRangePushA("create task_queue");
-    auto task_queue = stdgpu::queue<thrust::pair<short, int64_t>>::createDeviceObject(queue_cap);
+    auto task_queue = static_cast<thrust::pair<short, int64_t> *>(device->AllocWorkspace(ctx, queue_cap * sizeof(thrust::pair<short, int64_t>)));
+//    auto task_queue = stdgpu::queue<thrust::pair<short, int64_t>>::createDeviceObject(queue_cap);
     nvtxRangePop();
 
     nvtxRangePushA("create bits");
@@ -557,9 +589,10 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     // init
     const dim3 init_block(512);
-    const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
+//    const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
+    const dim3 init_grid((queue_cap + init_block.x - 1) / init_block.x);
 //    const dim3 init_grid((num_rows * hops + init_block.x - 1) / init_block.x);
-    CUDA_KERNEL_CALL((queue_init), init_grid, init_block, 0, stream, task_queue, bool_arr, sliced_rows, num_rows, hops, mat.num_rows);
+    CUDA_KERNEL_CALL((queue_init), init_grid, init_block, 0, stream, task_queue, bool_arr, sliced_rows, num_rows, hops, mat.num_rows, queue_cap);
 //    assert(task_queue.size() == num_rows);
 
     nvtxRangePushA("create array of structs of array");
@@ -587,7 +620,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const dim3 block(BLOCK_SIZE);
     // should gird num be max?
     // best performance:arxiv, [25,10]
-    const dim3 grid(num_rows);
+//    const dim3 grid(num_rows);
+    const dim3 grid(queue_cap);
 //    const dim3 grid(num_rows * hops);
 //    const dim3 grid(1);
 
@@ -595,10 +629,15 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     CUDA_CALL(cudaMemset(vector_lens, 0, hops * sizeof(uint)));
     uint* vector_lens_h = (uint *) malloc(hops * sizeof(uint));
     CUDA_CALL(cudaMemcpy(vector_lens_h, vector_lens, sizeof(uint) * hops, cudaMemcpyDeviceToHost));
+    uint tail_init = num_rows, finished_block_num_init = 0;
+    CUDA_CALL(cudaMemcpyToSymbol(tail_index, &tail_init, sizeof(uint)));
+    CUDA_CALL(cudaMemcpyToSymbol(finished_block_num, &finished_block_num_init, sizeof(uint)));
+//    std::printf("cuda kernel launched\n");
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
                      random_seed, num_picks_ptr, vector_lens, sliced_rows, num_rows, hops, mat.num_rows, in_ptr, in_cols, data,
                      task_queue, bool_arr, struct_arr_d);
 //    assert(task_queue.empty());
+//    CUDA_CALL(cudaDeviceSynchronize());
 //    std::printf("cuda kernel finished\n");
 
     // 传多个COO res的row, col, idx的指针的指针，用res_vector取fill，逻辑上最直观. 传指针的指针要写个demo试一下
@@ -619,10 +658,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     device->FreeWorkspace(ctx, bool_arr);
     device->FreeWorkspace(ctx, struct_arr_d);
     device->FreeWorkspace(ctx, vector_lens);
-//    device->FreeWorkspace(ctx, res_vector);
-    nvtxRangePushA("free stdgpu queue");
-    stdgpu::queue<thrust::pair<short, int64_t>>::destroyDeviceObject(task_queue);
-    nvtxRangePop();
+    device->FreeWorkspace(ctx, task_queue);
     nvtxRangePop();
 
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism finished here\n");
