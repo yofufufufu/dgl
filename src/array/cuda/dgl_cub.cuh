@@ -8,9 +8,9 @@
 #define DGL_ARRAY_CUDA_DGL_CUB_CUH_
 
 // This should be defined in CMakeLists.txt
-//#ifndef THRUST_CUB_WRAPPED_NAMESPACE
-//static_assert(false, "THRUST_CUB_WRAPPED_NAMESPACE must be defined for DGL.");
-//#endif
+#ifndef THRUST_CUB_WRAPPED_NAMESPACE
+static_assert(false, "THRUST_CUB_WRAPPED_NAMESPACE must be defined for DGL.");
+#endif
 
 #include "cub/cub.cuh"
 

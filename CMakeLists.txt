@@ -1,3 +1,4 @@
+#TODO: Remove stdgpu usage in Cmake
 cmake_minimum_required(VERSION 3.5)
 ########################################
 # Borrowed and adapted from TVM project
@@ -48,7 +49,7 @@ if(USE_CUDA)
   # to use stdgpu in custom sampler
   project(dgl C CXX CUDA)
   # see https://github.com/NVIDIA/thrust/issues/1401
-#  add_definitions(-DTHRUST_CUB_WRAPPED_NAMESPACE=dgl)
+  add_definitions(-DTHRUST_CUB_WRAPPED_NAMESPACE=dgl)
   include(cmake/modules/CUDA.cmake)
   message(STATUS "Use external CUB/Thrust library for a consistent API and performance.")
   cuda_include_directories(BEFORE "${CMAKE_SOURCE_DIR}/third_party/thrust")
