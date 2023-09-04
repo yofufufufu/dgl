@@ -104,11 +104,19 @@ struct selectedEdgeInfo {
     int64_t* datas;
 };
 
+// must be volatile!
+ __device__ volatile uint tail_index;
+ __device__ volatile uint finished_block_num;
 // should try to push the node with more edges first
-__global__ void queue_init(
+//TODO: if let init_kernel kernel do more things, try overlap it with more host codes
+__global__ void init_kernel(
         thrust::pair<short, int64_t>* queue, uint* bits, const int64_t* const in_rows,
-        const int64_t num_rows, const int hops, const int64_t total_num_rows, const int64_t queue_cap) {
+        const int64_t num_rows, const int hops, const int64_t queue_cap) {
     const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (tIdx == 0) {
+        tail_index = num_rows;
+        finished_block_num = 0;
+    }
 //    if (tIdx < num_rows * hops) {
 //        int hop_num = 1 + tIdx / num_rows;
 //        queue.push({hop_num, in_rows[tIdx % num_rows]});
@@ -119,17 +127,14 @@ __global__ void queue_init(
         queue[tIdx] = {1, in_rows[tIdx]};
     }
     // thread num > queue_cap, should restrict else condition
-    else if (tIdx < queue_cap){
+    else if (tIdx < queue_cap) {
         // avoid read uninitialized value, which can cause strange error
         queue[tIdx] = {0, -1};
     }
 }
 
-// must be volatile!
-__device__ volatile uint tail_index;
-__device__ volatile uint finished_block_num;
 __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
-        const uint64_t rand_seed, const int64_t * num_picks, uint* vector_lens, const int64_t * const in_rows,
+        const uint64_t rand_seed, const int64_t * num_picks, uint* vector_lens,
         const int64_t num_rows, const int hops, const int64_t total_num_rows,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
         // must be volatile!
@@ -143,7 +148,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
     // any better solution?
     __shared__ int64_t permList[128];
 
-    // do not use separate init kernel maybe faster? the result seems correct although only block level sync
+    // do not use separate init kernel which maybe faster? the result seems correct although only block level sync
     // not correct! convergence will be changed(accuracy~0.6, correct accuracy~0.7)
 //    const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
 //    if (tIdx < num_rows) {
@@ -172,14 +177,16 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
             // run task, same block threads have same task(hop_num, row_num)
 //            if (threadIdx.x == 0)
 //                std::printf("block %d is working\n", blockIdx.x);
-            // write to task queue may not visible, so task will be init value, i.e.{0,0}
-            const short hop_num = task_queue[blockIdx.x].first;
-            const int64_t row = task_queue[blockIdx.x].second;
-            // just do again. (any better solution?)
-            if (hop_num == 0 || row == -1) {
-//                std::printf("hop_num: %d, row: %ld\n", hop_num, row);
-                __syncthreads();
-                continue;
+            // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
+//            const short hop_num = task_queue[blockIdx.x].first;
+//            const int64_t row = task_queue[blockIdx.x].second;
+            // just do again, use while loop(any better solution?).
+            // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
+            short hop_num = task_queue[blockIdx.x].first;
+            int64_t row = task_queue[blockIdx.x].second;
+            while (hop_num == 0 || row == -1) {
+                hop_num = task_queue[blockIdx.x].first;
+                row = task_queue[blockIdx.x].second;
             }
 
             const int64_t in_row_start = in_ptr[row];
@@ -190,8 +197,8 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
                 // just copy row when there is not enough nodes to sample
                 for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
                     const int64_t in_idx = in_row_start + idx;
-                    auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
                     // TODO: can this atomic operation be optimized?
+                    auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
                     result[hop_num - 1].rows[index] = row;
                     result[hop_num - 1].cols[index] = in_index[in_idx];
                     result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
@@ -584,15 +591,17 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     nvtxRangePushA("create bits");
     uint* bool_arr = static_cast<uint *>(device->AllocWorkspace(ctx, mat.num_rows * (hops - 1) * sizeof(uint)));
-    CUDA_CALL(cudaMemset(bool_arr, 0, mat.num_rows * (hops - 1) * sizeof(uint)));
+    const auto bits_size = mat.num_rows * (hops - 1);
+    //TODO: reset in init_kernel kernel(maybe better) or using async cudaMemset
+    CUDA_CALL(cudaMemset(bool_arr, 0, bits_size * sizeof(uint)));
     nvtxRangePop();
 
     // init
     const dim3 init_block(512);
 //    const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
-    const dim3 init_grid((queue_cap + init_block.x - 1) / init_block.x);
 //    const dim3 init_grid((num_rows * hops + init_block.x - 1) / init_block.x);
-    CUDA_KERNEL_CALL((queue_init), init_grid, init_block, 0, stream, task_queue, bool_arr, sliced_rows, num_rows, hops, mat.num_rows, queue_cap);
+    const dim3 init_grid((queue_cap + init_block.x - 1) / init_block.x);
+    CUDA_KERNEL_CALL((init_kernel), init_grid, init_block, 0, stream, task_queue, bool_arr, sliced_rows, num_rows, hops, queue_cap);
 //    assert(task_queue.size() == num_rows);
 
     nvtxRangePushA("create array of structs of array");
@@ -609,6 +618,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         struct_arr_h[i].datas = static_cast<int64_t*>(picked_indices[i]->data);
         node_num += hop_res_num;
     }
+    //TODO: res_vector can be reused, and need not to reset everytime because we "push" the result by atomic index!
+    // and then using `CreateView` to get the corrct result
     auto struct_arr_d = static_cast<selectedEdgeInfo *>(device->AllocWorkspace(ctx, hops * sizeof(selectedEdgeInfo)));
     CUDA_CALL(cudaMemcpy(struct_arr_d, struct_arr_h, sizeof(selectedEdgeInfo) * hops, cudaMemcpyHostToDevice));
     nvtxRangePop();
@@ -618,8 +629,6 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const uint64_t random_seed = 1234;
 
     const dim3 block(BLOCK_SIZE);
-    // should gird num be max?
-    // best performance:arxiv, [25,10]
 //    const dim3 grid(num_rows);
     const dim3 grid(queue_cap);
 //    const dim3 grid(num_rows * hops);
@@ -628,13 +637,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     uint* vector_lens = static_cast<uint *>(device->AllocWorkspace(ctx, hops * sizeof(uint)));
     CUDA_CALL(cudaMemset(vector_lens, 0, hops * sizeof(uint)));
     uint* vector_lens_h = (uint *) malloc(hops * sizeof(uint));
-    CUDA_CALL(cudaMemcpy(vector_lens_h, vector_lens, sizeof(uint) * hops, cudaMemcpyDeviceToHost));
-    uint tail_init = num_rows, finished_block_num_init = 0;
-    CUDA_CALL(cudaMemcpyToSymbol(tail_index, &tail_init, sizeof(uint)));
-    CUDA_CALL(cudaMemcpyToSymbol(finished_block_num, &finished_block_num_init, sizeof(uint)));
 //    std::printf("cuda kernel launched\n");
     CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
-                     random_seed, num_picks_ptr, vector_lens, sliced_rows, num_rows, hops, mat.num_rows, in_ptr, in_cols, data,
+                     random_seed, num_picks_ptr, vector_lens, num_rows, hops, mat.num_rows, in_ptr, in_cols, data,
                      task_queue, bool_arr, struct_arr_d);
 //    assert(task_queue.empty());
 //    CUDA_CALL(cudaDeviceSynchronize());
