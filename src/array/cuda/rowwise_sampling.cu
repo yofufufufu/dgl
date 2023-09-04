@@ -592,7 +592,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     nvtxRangePushA("create bits");
     uint* bool_arr = static_cast<uint *>(device->AllocWorkspace(ctx, mat.num_rows * (hops - 1) * sizeof(uint)));
     const auto bits_size = mat.num_rows * (hops - 1);
-    //TODO: reset in init_kernel kernel(maybe better) or using async cudaMemset
+    //TODO: reset in init_kernel kernel(maybe better)
     CUDA_CALL(cudaMemset(bool_arr, 0, bits_size * sizeof(uint)));
     nvtxRangePop();
 
@@ -647,6 +647,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     // 传多个COO res的row, col, idx的指针的指针，用res_vector取fill，逻辑上最直观. 传指针的指针要写个demo试一下
     nvtxRangePushA("get result");
+    //TODO: cannot overlap with host(DGL can)
     CUDA_CALL(cudaMemcpy(vector_lens_h, vector_lens, sizeof(uint) * hops, cudaMemcpyDeviceToHost));
     std::vector<COOMatrix> ret_coo(hops);
     for(int i = 0; i < hops; i++) {
