@@ -45,9 +45,9 @@ endif(NOT MSVC)
 
 if(USE_CUDA)
   message(STATUS "Build with CUDA support")
-#  project(dgl C CXX)
+  project(dgl C CXX)
   # to use stdgpu in custom sampler
-  project(dgl C CXX CUDA)
+#  project(dgl C CXX CUDA)
   # see https://github.com/NVIDIA/thrust/issues/1401
   add_definitions(-DTHRUST_CUB_WRAPPED_NAMESPACE=dgl)
   include(cmake/modules/CUDA.cmake)
@@ -199,18 +199,18 @@ add_subdirectory("third_party/dmlc-core")
 list(APPEND DGL_LINKER_LIBS dmlc)
 set(GOOGLE_TEST 0) # Turn off dmlc-core test
 
-# custom sampler using stdgpu
-# Exclude the examples from the build
-set(STDGPU_BUILD_EXAMPLES OFF CACHE INTERNAL "")
-# Exclude the benchmarks from the build
-set(STDGPU_BUILD_BENCHMARKS OFF CACHE INTERNAL "")
-# Exclude the tests from the build
-set(STDGPU_BUILD_TESTS OFF CACHE INTERNAL "")
-add_subdirectory(third_party/stdgpu)
-#set(CMAKE_PREFIX_PATH  ${CMAKE_PREFIX_PATH} "/home/tang22/mydgl/dgl/third_party/stdgpu/bin/lib/cmake/stdgpu/")
-#find_package(stdgpu 1.3.0 REQUIRED)
-#list(APPEND DGL_LINKER_LIBS stdgpu::stdgpu)
-target_link_libraries(dgl stdgpu::stdgpu)
+## custom sampler using stdgpu
+## Exclude the examples from the build
+#set(STDGPU_BUILD_EXAMPLES OFF CACHE INTERNAL "")
+## Exclude the benchmarks from the build
+#set(STDGPU_BUILD_BENCHMARKS OFF CACHE INTERNAL "")
+## Exclude the tests from the build
+#set(STDGPU_BUILD_TESTS OFF CACHE INTERNAL "")
+#add_subdirectory(third_party/stdgpu)
+##set(CMAKE_PREFIX_PATH  ${CMAKE_PREFIX_PATH} "/home/tang22/mydgl/dgl/third_party/stdgpu/bin/lib/cmake/stdgpu/")
+##find_package(stdgpu 1.3.0 REQUIRED)
+##list(APPEND DGL_LINKER_LIBS stdgpu::stdgpu)
+#target_link_libraries(dgl stdgpu::stdgpu)
 
 # Compile METIS
 if(NOT MSVC)
