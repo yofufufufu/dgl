@@ -169,8 +169,15 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
         // `printf` can change data visibility by some ways...
         // see: https://forums.developer.nvidia.com/t/printf-in-cuda-kernel-changes-program-behavior/234524
 
-        if (threadIdx.x == 0)
-            sharedRes[0] = blockIdx.x < tail_index;
+        if (threadIdx.x == 0) {
+            sharedRes[0] = false;
+            while (finished_block_num != tail_index) {
+                if (blockIdx.x < tail_index) {
+                    sharedRes[0] = true;
+                    break;
+                }
+            }
+        }
         __syncthreads();
 
         if (sharedRes[0]) {
@@ -276,15 +283,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
             break;
         }
         else {
-            // blockIdx.x >= tail_index
-            // finished_block_num must increase slower than tail_index
-            if (threadIdx.x == 0) {
-                sharedRes[0] = finished_block_num == tail_index;
-            }
-            __syncthreads();
-            if (sharedRes[0]) {
-                break;
-            }
+            break;
         }
         // must add?
 //        __syncthreads();
