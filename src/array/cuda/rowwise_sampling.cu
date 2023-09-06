@@ -276,7 +276,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
             break;
         }
         else {
-            // blockidx.x >= tail_index
+            // blockIdx.x >= tail_index
             // finished_block_num must increase slower than tail_index
             if (threadIdx.x == 0) {
                 sharedRes[0] = finished_block_num == tail_index;
