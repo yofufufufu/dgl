@@ -163,130 +163,125 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
     curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
 //    curand_init(rand_seed, 0, 0, &rng);
 
-    while (true) {
-        // writes to tail_index and finished_block_num is not visible(at least within a period of time) to other blocks
-        // if variables are not volatile, the value will be cached?
-        // so other blocks will loop infinite time in a very short time, which causes program hung.
-        // `printf` can change data visibility by some ways...
-        // see: https://forums.developer.nvidia.com/t/printf-in-cuda-kernel-changes-program-behavior/234524
-
-        if (threadIdx.x == 0) {
-            sharedRes[0] = false;
-            while (finished_block_num != tail_index) {
-                if (blockIdx.x < tail_index) {
-                    sharedRes[0] = true;
-                    break;
-                }
+    // writes to tail_index and finished_block_num is not visible(at least within a period of time) to other blocks
+    // if variables are not volatile, the value will be cached?
+    // so other blocks will loop infinite time in a very short time, which causes program hung.
+    // `printf` can change data visibility by some ways...
+    // see: https://forums.developer.nvidia.com/t/printf-in-cuda-kernel-changes-program-behavior/234524
+    if (threadIdx.x == 0) {
+        sharedRes[0] = false;
+        while (finished_block_num != tail_index) {
+            if (blockIdx.x < tail_index) {
+                sharedRes[0] = true;
+                break;
             }
         }
-        __syncthreads();
+    }
+    __syncthreads();
 
-        if (sharedRes[0]) {
-            // run task, same block threads have same task(hop_num, row_num)
+    if (sharedRes[0]) {
+        // run task, same block threads have same task(hop_num, row_num)
 //            if (threadIdx.x == 0)
 //                std::printf("block %d is working\n", blockIdx.x);
-            // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
-            // just do again, use while loop(any better solution?).
-            // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
-            short hop_num = task_queue[blockIdx.x].first;
-            int64_t row = task_queue[blockIdx.x].second;
-            while (hop_num == 0 || row == -1) {
-                hop_num = task_queue[blockIdx.x].first;
-                row = task_queue[blockIdx.x].second;
-            }
+        // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
+        // just do again, use while loop(any better solution?).
+        // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
+        short hop_num = task_queue[blockIdx.x].first;
+        int64_t row = task_queue[blockIdx.x].second;
+        while (hop_num == 0 || row == -1) {
+            hop_num = task_queue[blockIdx.x].first;
+            row = task_queue[blockIdx.x].second;
+        }
 
-            const int64_t in_row_start = in_ptr[row];
-            const int64_t deg = in_ptr[row + 1] - in_row_start;
-            const int64_t num_pick = num_picks[hop_num - 1];
+        const int64_t in_row_start = in_ptr[row];
+        const int64_t deg = in_ptr[row + 1] - in_row_start;
+        const int64_t num_pick = num_picks[hop_num - 1];
 
-            if (deg <= num_pick) {
-                // just copy row when there is not enough nodes to sample
-                for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
-                    const int64_t in_idx = in_row_start + idx;
-                    // TODO: can this atomic operation be optimized?
-                    auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
-                    result[hop_num - 1].rows[index] = row;
-                    result[hop_num - 1].cols[index] = in_index[in_idx];
-                    result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
-                    // last hop don't need to push task
-                    if (hop_num < hops) {
-                        if (!bits[in_index[in_idx] + total_num_rows * (hop_num - 1)]) {
-                            //  auto old = bits.set(in_index[in_idx] * hop_num);
-                            auto old = atomicOr(&bits[in_index[in_idx] + total_num_rows * (hop_num - 1)], 1);
-                            if (!old) {
-                                auto tail = atomicAdd((uint *)&tail_index, 1);
-                                task_queue[tail].first = hop_num + 1;
-                                task_queue[tail].second = in_index[in_idx];
+        if (deg <= num_pick) {
+            // just copy row when there is not enough nodes to sample
+            for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
+                const int64_t in_idx = in_row_start + idx;
+                // TODO: can this atomic operation be optimized?
+                auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
+                result[hop_num - 1].rows[index] = row;
+                result[hop_num - 1].cols[index] = in_index[in_idx];
+                result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
+                // last hop don't need to push task
+                if (hop_num < hops) {
+                    if (!bits[in_index[in_idx] + total_num_rows * (hop_num - 1)]) {
+                        //  auto old = bits.set(in_index[in_idx] * hop_num);
+                        auto old = atomicOr(&bits[in_index[in_idx] + total_num_rows * (hop_num - 1)], 1);
+                        if (!old) {
+                            auto tail = atomicAdd((uint *) &tail_index, 1);
+                            task_queue[tail].first = hop_num + 1;
+                            task_queue[tail].second = in_index[in_idx];
 //                                task_queue[tail] = {hop_num + 1, in_index[in_idx]};
-                            }
-                        }
-                    }
-                }
-            } else {
-                // generate permutation list via reservoir algorithm
-                // reservoir init
-                for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
-                    permList[idx] = idx;
-                }
-                __syncthreads();
-
-                for (int idx = num_pick + threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
-                    const int num = curand(&rng) % (idx + 1);
-                    if (num < num_pick) {
-                        // use shared memory, faster than DGL?
-                        AtomicMax(permList + num, idx);
-                    }
-                }
-                __syncthreads();
-
-                for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
-                    // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
-                    const int64_t perm_idx = permList[idx] + in_row_start;
-                    auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
-                    result[hop_num - 1].rows[index] = row;
-                    result[hop_num - 1].cols[index] = in_index[perm_idx];
-                    result[hop_num - 1].datas[index] = data ? data[perm_idx] : perm_idx;
-                    // last hop don't need to push task
-                    if (hop_num < hops) {
-                        if (!bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)]) {
-                            auto old = atomicOr(&bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)], 1);
-                            if (!old) {
-                                auto tail = atomicAdd((uint *)&tail_index, 1);
-//                                task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
-                                task_queue[tail].first = hop_num + 1;
-                                task_queue[tail].second = in_index[perm_idx];
-                            }
                         }
                     }
                 }
             }
-            // push self
-            if (threadIdx.x == 0 && hop_num < hops) {
-                if (!bits[row + total_num_rows * (hop_num - 1)]) {
-                    auto old = atomicOr(&bits[row + total_num_rows * (hop_num - 1)], 1);
-                    if (!old) {
-                        auto tail = atomicAdd((uint *)&tail_index, 1);
-//                        task_queue[tail] = {hop_num + 1, row};
-                        task_queue[tail].first = hop_num + 1;
-                        task_queue[tail].second = row;
-                    }
-                }
+        } else {
+            // generate permutation list via reservoir algorithm
+            // reservoir init
+            for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
+                permList[idx] = idx;
             }
-            // enough blocks, every block loop once.
             __syncthreads();
-            // must add?
-//            __threadfence_system();
-            if (threadIdx.x == 0)
-                atomicAdd((uint *)&finished_block_num, 1);
-//            __syncthreads();
-            break;
+
+            for (int idx = num_pick + threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
+                const int num = curand(&rng) % (idx + 1);
+                if (num < num_pick) {
+                    // use shared memory, faster than DGL?
+                    AtomicMax(permList + num, idx);
+                }
+            }
+            __syncthreads();
+
+            for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
+                // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
+                const int64_t perm_idx = permList[idx] + in_row_start;
+                auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
+                result[hop_num - 1].rows[index] = row;
+                result[hop_num - 1].cols[index] = in_index[perm_idx];
+                result[hop_num - 1].datas[index] = data ? data[perm_idx] : perm_idx;
+                // last hop don't need to push task
+                if (hop_num < hops) {
+                    if (!bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)]) {
+                        auto old = atomicOr(&bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)], 1);
+                        if (!old) {
+                            auto tail = atomicAdd((uint *) &tail_index, 1);
+//                                task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
+                            task_queue[tail].first = hop_num + 1;
+                            task_queue[tail].second = in_index[perm_idx];
+                        }
+                    }
+                }
+            }
         }
-        else {
-            break;
+        // push self
+        if (threadIdx.x == 0 && hop_num < hops) {
+            if (!bits[row + total_num_rows * (hop_num - 1)]) {
+                auto old = atomicOr(&bits[row + total_num_rows * (hop_num - 1)], 1);
+                if (!old) {
+                    auto tail = atomicAdd((uint *) &tail_index, 1);
+//                        task_queue[tail] = {hop_num + 1, row};
+                    task_queue[tail].first = hop_num + 1;
+                    task_queue[tail].second = row;
+                }
+            }
         }
+        // enough blocks, every block loop once.
+        __syncthreads();
         // must add?
-//        __syncthreads();
+//            __threadfence_system();
+        if (threadIdx.x == 0)
+            atomicAdd((uint *) &finished_block_num, 1);
+//            __syncthreads();
+    } else {
+        return;
     }
+    // must add?
+//        __syncthreads();
 }
 
 /**
