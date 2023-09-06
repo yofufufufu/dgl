@@ -24,6 +24,7 @@ namespace impl {
 namespace {
 
 constexpr int BLOCK_SIZE = 128;
+constexpr int BLOCK_SIZE_CUSTOM = 96;
 
 /**
  * @brief Compute the size of each row in the sampled CSR, without replacement.
@@ -133,7 +134,7 @@ __global__ void init_kernel(
     }
 }
 
-__launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
+__launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         const uint64_t rand_seed, const int64_t * num_picks, uint* vector_lens,
         const int64_t num_rows, const int hops, const int64_t total_num_rows,
         const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
@@ -185,8 +186,6 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 //            if (threadIdx.x == 0)
 //                std::printf("block %d is working\n", blockIdx.x);
             // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
-//            const short hop_num = task_queue[blockIdx.x].first;
-//            const int64_t row = task_queue[blockIdx.x].second;
             // just do again, use while loop(any better solution?).
             // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
             short hop_num = task_queue[blockIdx.x].first;
@@ -202,7 +201,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
 
             if (deg <= num_pick) {
                 // just copy row when there is not enough nodes to sample
-                for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
+                for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
                     const int64_t in_idx = in_row_start + idx;
                     // TODO: can this atomic operation be optimized?
                     auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
@@ -226,12 +225,12 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
             } else {
                 // generate permutation list via reservoir algorithm
                 // reservoir init
-                for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE) {
+                for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
                     permList[idx] = idx;
                 }
                 __syncthreads();
 
-                for (int idx = num_pick + threadIdx.x; idx < deg; idx += BLOCK_SIZE) {
+                for (int idx = num_pick + threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
                     const int num = curand(&rng) % (idx + 1);
                     if (num < num_pick) {
                         // use shared memory, faster than DGL?
@@ -240,7 +239,7 @@ __launch_bounds__(128) __global__ void _CSRRowWiseSampleUniformTaskParallelismKe
                 }
                 __syncthreads();
 
-                for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE) {
+                for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
                     // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
                     const int64_t perm_idx = permList[idx] + in_row_start;
                     auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
@@ -627,7 +626,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     // fix only for reproduce!
     const uint64_t random_seed = 1234;
 
-    const dim3 block(BLOCK_SIZE);
+    const dim3 block(BLOCK_SIZE_CUSTOM);
 //    const dim3 grid(num_rows);
     const dim3 grid(queue_cap);
 //    const dim3 grid(num_rows * hops);
