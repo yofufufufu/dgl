@@ -536,6 +536,7 @@ COOMatrix _CSRRowWiseSamplingUniform(
   picked_col = picked_col.CreateView({new_len}, picked_col->dtype);
   picked_idx = picked_idx.CreateView({new_len}, picked_idx->dtype);
 
+  cudaDeviceSynchronize();
   return COOMatrix(
       mat.num_rows, mat.num_cols, picked_row, picked_col, picked_idx);
 }
@@ -672,6 +673,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     uint actual_queue_size;
     CUDA_CALL(cudaMemcpyFromSymbol(&actual_queue_size, tail_index, sizeof(uint), 0));
     // for correctness
+    // (if not all producer has finished their job, actual_queue_size is not the corrct value too)
     assert(actual_queue_size <= est_queue_cap);
     historical_max_queue_size = std::max(historical_max_queue_size, actual_queue_size);
 
