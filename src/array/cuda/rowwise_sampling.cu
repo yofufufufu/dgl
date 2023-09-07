@@ -107,7 +107,8 @@ struct selectedEdgeInfo {
 
 // must be volatile!
  __device__ volatile uint tail_index;
- __device__ volatile uint finished_block_num;
+// __device__ volatile uint finished_block_num;
+ __device__ uint task_idx;
 // should try to push the node with more edges first
 //TODO: if let init_kernel kernel do more things, try overlap it with more host codes
 __global__ void init_kernel(
@@ -116,7 +117,8 @@ __global__ void init_kernel(
     const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
     if (tIdx == 0) {
         tail_index = num_rows;
-        finished_block_num = 0;
+//        finished_block_num = 0;
+        task_idx = 0;
     }
 //    if (tIdx < num_rows * hops) {
 //        int hop_num = 1 + tIdx / num_rows;
@@ -145,6 +147,7 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
         ) {
 //    __shared__ int64_t blockTask[2];
     __shared__ bool sharedRes[1];
+    __shared__ uint sharedTask[1];
     // num_pick cannot be larger than 128
     // any better solution?
     __shared__ int64_t permList[128];
@@ -154,14 +157,30 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
     // so other blocks will loop infinite time in a very short time, which causes program hung.
     // `printf` can change data visibility by some ways...
     // see: https://forums.developer.nvidia.com/t/printf-in-cuda-kernel-changes-program-behavior/234524
+
+//    if (threadIdx.x == 0) {
+//        sharedRes[0] = false;
+//        while (finished_block_num != tail_index) {
+//            if (blockIdx.x < tail_index) {
+//                sharedRes[0] = true;
+//                break;
+//            }
+//        }
+//    }
+//    __syncthreads();
+
     if (threadIdx.x == 0) {
-        sharedRes[0] = false;
-        while (finished_block_num != tail_index) {
-            if (blockIdx.x < tail_index) {
+        auto taskid = atomicAdd(&task_idx, 1);
+        sharedTask[0] = taskid;
+        if (taskid >= tail_index) {
+            // theoretical max block resident on 3090 when block size 96, and training need drop last when batchSize < 1312
+            if (taskid < 1312)
                 sharedRes[0] = true;
-                break;
-            }
+            else
+                sharedRes[0] = false;
         }
+        else
+            sharedRes[0] = true;
     }
     __syncthreads();
 
@@ -176,11 +195,12 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
         // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
         // just do again, use while loop(any better solution?).
         // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
-        short hop_num = task_queue[blockIdx.x].first;
-        int64_t row = task_queue[blockIdx.x].second;
+        auto const taskid = sharedTask[0];
+        short hop_num = task_queue[taskid].first;
+        int64_t row = task_queue[taskid].second;
         while (hop_num == 0 || row == -1) {
-            hop_num = task_queue[blockIdx.x].first;
-            row = task_queue[blockIdx.x].second;
+            hop_num = task_queue[taskid].first;
+            row = task_queue[taskid].second;
         }
 
         const int64_t in_row_start = in_ptr[row];
@@ -261,11 +281,11 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
             }
         }
         // enough blocks, every block loop once.
-        __syncthreads();
+//        __syncthreads();
         // must add?
 //            __threadfence_system();
-        if (threadIdx.x == 0)
-            atomicAdd((uint *) &finished_block_num, 1);
+//        if (threadIdx.x == 0)
+//            atomicAdd((uint *) &finished_block_num, 1);
 //            __syncthreads();
     } else {
         return;
