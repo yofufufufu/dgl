@@ -149,6 +149,20 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
     // any better solution?
     __shared__ int64_t permList[128];
 
+    // do not use separate init kernel which maybe faster? the result seems correct although only block level sync
+    // not correct! convergence will be changed(accuracy~0.6, correct accuracy~0.7)
+//    const int tIdx = threadIdx.x + blockIdx.x * blockDim.x;
+//    if (tIdx < num_rows) {
+//        task_queue.push({1, in_rows[tIdx]});
+//    }
+//    __syncthreads();
+
+    curandStatePhilox4_32_10_t rng;
+    // different block has different seed
+    // different thread in block has different (sub)sequence
+    curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
+//    curand_init(rand_seed, 0, 0, &rng);
+
     // writes to tail_index and finished_block_num is not visible(at least within a period of time) to other blocks
     // if variables are not volatile, the value will be cached?
     // so other blocks will loop infinite time in a very short time, which causes program hung.
@@ -166,13 +180,9 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
     __syncthreads();
 
     if (sharedRes[0]) {
-        curandStatePhilox4_32_10_t rng;
-        // different block has different seed
-        // different thread in block has different (sub)sequence
-        curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
-        // curand_init(rand_seed, 0, 0, &rng);
-
         // run task, same block threads have same task(hop_num, row_num)
+//            if (threadIdx.x == 0)
+//                std::printf("block %d is working\n", blockIdx.x);
         // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
         // just do again, use while loop(any better solution?).
         // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
