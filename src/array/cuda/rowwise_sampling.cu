@@ -638,7 +638,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     if (historical_max_queue_size == 0)
         est_queue_cap = queue_cap;
     else
-        est_queue_cap = (queue_cap + historical_max_queue_size) / 2;
+        // more extreme
+        est_queue_cap = historical_max_queue_size + num_rows;
     const dim3 grid(est_queue_cap);
 //    const dim3 grid(num_rows * hops);
 //    const dim3 grid(1);
@@ -667,8 +668,11 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     }
     nvtxRangePop();
 
+    //TODO: we can do this only one epoch
     uint actual_queue_size;
     CUDA_CALL(cudaMemcpyFromSymbol(&actual_queue_size, tail_index, sizeof(uint), 0));
+    // for correctness
+    assert(actual_queue_size <= est_queue_cap);
     historical_max_queue_size = std::max(historical_max_queue_size, actual_queue_size);
 
     nvtxRangePushA("free container");
