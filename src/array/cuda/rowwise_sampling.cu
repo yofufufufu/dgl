@@ -555,6 +555,7 @@ COOMatrix CSRRowWiseSamplingUniform(
   }
 }
 
+uint historical_max_queue_size = 0;
 std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         CSRMatrix mat, IdArray rows, const IdArray &num_picks) {
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism run here\n");
@@ -582,11 +583,11 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const int64_t* num_picks_ptr = static_cast<int64_t*>(GetDevicePointer(num_picks));
 
     // allocate space for stdgpu container
-    int64_t queue_cap = num_rows;
+    uint queue_cap = num_rows;
     // last hop sample result do not need to enqueue
     for (int i = 0; i < hops - 1; i++)
         queue_cap += queue_cap * (num_picks_vec[i] + 1);
-    // pair(hop_num, src_node_id)
+
     nvtxRangePushA("create task_queue");
     auto task_queue = static_cast<thrust::pair<short, int64_t> *>(device->AllocWorkspace(ctx, queue_cap * sizeof(thrust::pair<short, int64_t>)));
 //    auto task_queue = stdgpu::queue<thrust::pair<short, int64_t>>::createDeviceObject(queue_cap);
@@ -633,7 +634,12 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     const dim3 block(BLOCK_SIZE_CUSTOM);
 //    const dim3 grid(num_rows);
-    const dim3 grid(queue_cap);
+    uint est_queue_cap;
+    if (historical_max_queue_size == 0)
+        est_queue_cap = queue_cap;
+    else
+        est_queue_cap = (queue_cap + historical_max_queue_size) / 2;
+    const dim3 grid(est_queue_cap);
 //    const dim3 grid(num_rows * hops);
 //    const dim3 grid(1);
 
@@ -660,6 +666,10 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         ret_coo[i] = COOMatrix(mat.num_rows, mat.num_cols, picked_rows[i], picked_cols[i], picked_indices[i]);
     }
     nvtxRangePop();
+
+    uint actual_queue_size;
+    CUDA_CALL(cudaMemcpyFromSymbol(&actual_queue_size, tail_index, sizeof(uint), 0));
+    historical_max_queue_size = std::max(historical_max_queue_size, actual_queue_size);
 
     nvtxRangePushA("free container");
     free(struct_arr_h);
