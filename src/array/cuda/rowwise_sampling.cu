@@ -105,12 +105,9 @@ struct selectedEdgeInfo {
     int64_t* datas;
 };
 
-// must be volatile!
-// __device__ volatile uint tail_index;
  __device__ uint tail_index;
 // __device__ volatile uint finished_block_num;
  __device__ uint task_idx;
-// should try to push the node with more edges first
 //TODO: if let init_kernel kernel do more things, try overlap it with more host codes
 __global__ void init_kernel(
         thrust::pair<short, int64_t>* queue, uint* bits, const int64_t* const in_rows,
@@ -222,13 +219,11 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
                 if (hop_num < hops) {
                     const int64_t bits_offset = neighbor + total_num_rows * (hop_num - 1);
                     if (!bits[bits_offset]) {
-                        //  auto old = bits.set(in_index[in_idx] * hop_num);
                         auto old = atomicOr(bits + bits_offset, 1);
                         if (!old) {
                             auto tail = atomicAdd(&tail_index, 1);
                             task_queue[tail].first = hop_num + 1;
                             task_queue[tail].second = neighbor;
-//                                task_queue[tail] = {hop_num + 1, in_index[in_idx]};
                         }
                     }
                 }
@@ -265,7 +260,7 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
                         auto old = atomicOr(bits + bits_offset, 1);
                         if (!old) {
                             auto tail = atomicAdd(&tail_index, 1);
-//                                task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
+                            // task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
                             task_queue[tail].first = hop_num + 1;
                             task_queue[tail].second = neighbor;
                         }
@@ -280,7 +275,6 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
                 auto old = atomicOr(bits + bits_offset, 1);
                 if (!old) {
                     auto tail = atomicAdd(&tail_index, 1);
-//                        task_queue[tail] = {hop_num + 1, row};
                     task_queue[tail].first = hop_num + 1;
                     task_queue[tail].second = row;
                 }
@@ -581,12 +575,10 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
                           : nullptr;
     const int64_t* num_picks_ptr = static_cast<int64_t*>(GetDevicePointer(num_picks));
 
-    // allocate space for stdgpu container
     uint queue_cap = num_rows;
     // last hop sample result do not need to enqueue
     for (int i = 0; i < hops - 1; i++)
         queue_cap += queue_cap * (num_picks_vec[i] + 1);
-
     nvtxRangePushA("create task_queue");
     auto task_queue = static_cast<thrust::pair<short, int64_t> *>(device->AllocWorkspace(ctx, queue_cap * sizeof(thrust::pair<short, int64_t>)));
 //    auto task_queue = stdgpu::queue<thrust::pair<short, int64_t>>::createDeviceObject(queue_cap);
@@ -632,7 +624,6 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const uint64_t random_seed = 1234;
 
     const dim3 block(BLOCK_SIZE_CUSTOM);
-//    const dim3 grid(num_rows);
     uint est_queue_cap;
     if (historical_max_queue_size == 0)
         est_queue_cap = queue_cap;
@@ -640,6 +631,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         // more extreme
         est_queue_cap = historical_max_queue_size + num_rows;
     const dim3 grid(est_queue_cap);
+//    const dim3 grid(num_rows);
 //    const dim3 grid(num_rows * hops);
 //    const dim3 grid(1);
 
@@ -652,10 +644,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
                      task_queue, bool_arr, struct_arr_d);
 //    assert(task_queue.empty());
 //    CUDA_CALL(cudaDeviceSynchronize());
-
 //    std::printf("cuda kernel finished\n");
 
-    // 传多个COO res的row, col, idx的指针的指针，用res_vector取fill，逻辑上最直观. 传指针的指针要写个demo试一下
     nvtxRangePushA("get result");
     //TODO: cannot overlap with host(DGL can)
     CUDA_CALL(cudaMemcpy(vector_lens_h, vector_lens, sizeof(uint) * hops, cudaMemcpyDeviceToHost));
