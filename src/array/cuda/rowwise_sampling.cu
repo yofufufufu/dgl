@@ -220,9 +220,10 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
                 // last hop don't need to push task
                 // TODO: can this atomic operation be optimized?
                 if (hop_num < hops) {
-                    if (!bits[neighbor + total_num_rows * (hop_num - 1)]) {
+                    const int64_t bits_offset = neighbor + total_num_rows * (hop_num - 1);
+                    if (!bits[bits_offset]) {
                         //  auto old = bits.set(in_index[in_idx] * hop_num);
-                        auto old = atomicOr(&bits[neighbor + total_num_rows * (hop_num - 1)], 1);
+                        auto old = atomicOr(bits + bits_offset, 1);
                         if (!old) {
                             auto tail = atomicAdd(&tail_index, 1);
                             task_queue[tail].first = hop_num + 1;
@@ -259,8 +260,9 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
                 result[hop_num - 1].datas[index] = data ? data[perm_idx] : perm_idx;
                 // last hop don't need to push task
                 if (hop_num < hops) {
-                    if (!bits[neighbor + total_num_rows * (hop_num - 1)]) {
-                        auto old = atomicOr(&bits[neighbor + total_num_rows * (hop_num - 1)], 1);
+                    const int64_t bits_offset = neighbor + total_num_rows * (hop_num - 1);
+                    if (!bits[bits_offset]) {
+                        auto old = atomicOr(bits + bits_offset, 1);
                         if (!old) {
                             auto tail = atomicAdd(&tail_index, 1);
 //                                task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
@@ -273,8 +275,9 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
         }
         // push self
         if (threadIdx.x == 0 && hop_num < hops) {
-            if (!bits[row + total_num_rows * (hop_num - 1)]) {
-                auto old = atomicOr(&bits[row + total_num_rows * (hop_num - 1)], 1);
+            const int64_t bits_offset = row + total_num_rows * (hop_num - 1);
+            if (!bits[bits_offset]) {
+                auto old = atomicOr(bits + bits_offset, 1);
                 if (!old) {
                     auto tail = atomicAdd(&tail_index, 1);
 //                        task_queue[tail] = {hop_num + 1, row};
