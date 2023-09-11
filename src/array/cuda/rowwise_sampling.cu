@@ -213,7 +213,7 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
             for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
                 const int64_t in_idx = in_row_start + idx;
                 const int64_t neighbor = in_index[in_idx];
-                auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
+                auto index = atomicAdd(vector_lens + (hop_num - 1), 1);
                 result[hop_num - 1].rows[index] = row;
                 result[hop_num - 1].cols[index] = neighbor;
                 result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
@@ -254,7 +254,7 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
                 // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
                 const int64_t perm_idx = permList[idx] + in_row_start;
                 const int64_t neighbor = in_index[perm_idx];
-                auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
+                auto index = atomicAdd(vector_lens + (hop_num - 1), 1);
                 result[hop_num - 1].rows[index] = row;
                 result[hop_num - 1].cols[index] = neighbor;
                 result[hop_num - 1].datas[index] = data ? data[perm_idx] : perm_idx;
