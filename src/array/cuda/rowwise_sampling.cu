@@ -106,7 +106,8 @@ struct selectedEdgeInfo {
 };
 
 // must be volatile!
- __device__ volatile uint tail_index;
+// __device__ volatile uint tail_index;
+ __device__ uint tail_index;
 // __device__ volatile uint finished_block_num;
  __device__ uint task_idx;
 // should try to push the node with more edges first
@@ -211,18 +212,18 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
             // just copy row when there is not enough nodes to sample
             for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
                 const int64_t in_idx = in_row_start + idx;
-                // TODO: can this atomic operation be optimized?
                 auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
                 result[hop_num - 1].rows[index] = row;
                 result[hop_num - 1].cols[index] = in_index[in_idx];
                 result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
                 // last hop don't need to push task
+                // TODO: can this atomic operation be optimized?
                 if (hop_num < hops) {
                     if (!bits[in_index[in_idx] + total_num_rows * (hop_num - 1)]) {
                         //  auto old = bits.set(in_index[in_idx] * hop_num);
                         auto old = atomicOr(&bits[in_index[in_idx] + total_num_rows * (hop_num - 1)], 1);
                         if (!old) {
-                            auto tail = atomicAdd((uint *) &tail_index, 1);
+                            auto tail = atomicAdd(&tail_index, 1);
                             task_queue[tail].first = hop_num + 1;
                             task_queue[tail].second = in_index[in_idx];
 //                                task_queue[tail] = {hop_num + 1, in_index[in_idx]};
@@ -259,7 +260,7 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
                     if (!bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)]) {
                         auto old = atomicOr(&bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)], 1);
                         if (!old) {
-                            auto tail = atomicAdd((uint *) &tail_index, 1);
+                            auto tail = atomicAdd(&tail_index, 1);
 //                                task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
                             task_queue[tail].first = hop_num + 1;
                             task_queue[tail].second = in_index[perm_idx];
@@ -273,7 +274,7 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
             if (!bits[row + total_num_rows * (hop_num - 1)]) {
                 auto old = atomicOr(&bits[row + total_num_rows * (hop_num - 1)], 1);
                 if (!old) {
-                    auto tail = atomicAdd((uint *) &tail_index, 1);
+                    auto tail = atomicAdd(&tail_index, 1);
 //                        task_queue[tail] = {hop_num + 1, row};
                     task_queue[tail].first = hop_num + 1;
                     task_queue[tail].second = row;
@@ -654,6 +655,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
                      task_queue, bool_arr, struct_arr_d);
 //    assert(task_queue.empty());
 //    CUDA_CALL(cudaDeviceSynchronize());
+
 //    std::printf("cuda kernel finished\n");
 
     // 传多个COO res的row, col, idx的指针的指针，用res_vector取fill，逻辑上最直观. 传指针的指针要写个demo试一下
