@@ -212,20 +212,21 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
             // just copy row when there is not enough nodes to sample
             for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
                 const int64_t in_idx = in_row_start + idx;
+                const int64_t neighbor = in_index[in_idx];
                 auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
                 result[hop_num - 1].rows[index] = row;
-                result[hop_num - 1].cols[index] = in_index[in_idx];
+                result[hop_num - 1].cols[index] = neighbor;
                 result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
                 // last hop don't need to push task
                 // TODO: can this atomic operation be optimized?
                 if (hop_num < hops) {
-                    if (!bits[in_index[in_idx] + total_num_rows * (hop_num - 1)]) {
+                    if (!bits[neighbor + total_num_rows * (hop_num - 1)]) {
                         //  auto old = bits.set(in_index[in_idx] * hop_num);
-                        auto old = atomicOr(&bits[in_index[in_idx] + total_num_rows * (hop_num - 1)], 1);
+                        auto old = atomicOr(&bits[neighbor + total_num_rows * (hop_num - 1)], 1);
                         if (!old) {
                             auto tail = atomicAdd(&tail_index, 1);
                             task_queue[tail].first = hop_num + 1;
-                            task_queue[tail].second = in_index[in_idx];
+                            task_queue[tail].second = neighbor;
 //                                task_queue[tail] = {hop_num + 1, in_index[in_idx]};
                         }
                     }
@@ -251,19 +252,20 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
             for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
                 // permList[idx] is the idx of the sampled edge, from 0 to deg-1, should be added with in_row_start
                 const int64_t perm_idx = permList[idx] + in_row_start;
+                const int64_t neighbor = in_index[perm_idx];
                 auto index = atomicAdd(&vector_lens[hop_num - 1], 1);
                 result[hop_num - 1].rows[index] = row;
-                result[hop_num - 1].cols[index] = in_index[perm_idx];
+                result[hop_num - 1].cols[index] = neighbor;
                 result[hop_num - 1].datas[index] = data ? data[perm_idx] : perm_idx;
                 // last hop don't need to push task
                 if (hop_num < hops) {
-                    if (!bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)]) {
-                        auto old = atomicOr(&bits[in_index[perm_idx] + total_num_rows * (hop_num - 1)], 1);
+                    if (!bits[neighbor + total_num_rows * (hop_num - 1)]) {
+                        auto old = atomicOr(&bits[neighbor + total_num_rows * (hop_num - 1)], 1);
                         if (!old) {
                             auto tail = atomicAdd(&tail_index, 1);
 //                                task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
                             task_queue[tail].first = hop_num + 1;
-                            task_queue[tail].second = in_index[perm_idx];
+                            task_queue[tail].second = neighbor;
                         }
                     }
                 }
@@ -282,17 +284,9 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
             }
         }
         // enough blocks, every block loop once.
-//        __syncthreads();
-        // must add?
-//            __threadfence_system();
-//        if (threadIdx.x == 0)
-//            atomicAdd((uint *) &finished_block_num, 1);
-//            __syncthreads();
     } else {
         return;
     }
-    // must add?
-//        __syncthreads();
 }
 
 /**
@@ -596,8 +590,8 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     nvtxRangePop();
 
     nvtxRangePushA("create bits");
-    uint* bool_arr = static_cast<uint *>(device->AllocWorkspace(ctx, mat.num_rows * (hops - 1) * sizeof(uint)));
     const auto bits_size = mat.num_rows * (hops - 1);
+    uint* bool_arr = static_cast<uint *>(device->AllocWorkspace(ctx, bits_size * sizeof(uint)));
     //TODO: reset in init_kernel kernel(maybe better)
     CUDA_CALL(cudaMemset(bool_arr, 0, bits_size * sizeof(uint)));
     nvtxRangePop();
