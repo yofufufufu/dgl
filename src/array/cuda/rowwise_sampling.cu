@@ -224,6 +224,11 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
                             auto tail = atomicAdd(&tail_index, 1);
                             task_queue[tail].first = hop_num + 1;
                             task_queue[tail].second = neighbor;
+                            // TODO: we can get next hop srcnodes degree once sampled neighbors are got, can it be used?
+                            // use atomic here can be better?
+                            // next_src_deg = in_ptr[neighbor + 1] - in_ptr[neighbor]
+                            // `arr` can be included in result struct
+                            // arr[neighbor] = atomicAdd(&next_src_sample_res_start_idx, next_src_deg);
                         }
                     }
                 }
@@ -629,7 +634,12 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         est_queue_cap = queue_cap;
     else
         // more extreme
+        // 2-layer may almost no problem
+        // [10, 10, 10] almost no problem
+        // manually change it when batch_size(`num_rows`) small, for [15, 15, 15](maybe num_rows * 2) and [20, 20, 20](maybe num_rows * 4)
         est_queue_cap = historical_max_queue_size + num_rows;
+//        est_queue_cap = historical_max_queue_size + num_rows * 2;
+//        est_queue_cap = historical_max_queue_size + num_rows * 4;
     const dim3 grid(est_queue_cap);
 //    const dim3 grid(num_rows);
 //    const dim3 grid(num_rows * hops);
