@@ -24,7 +24,8 @@ namespace impl {
 namespace {
 
 constexpr int BLOCK_SIZE = 128;
-constexpr int FETCH_SIZE = 1;
+// 定的太大无法保证task_id的增速比tail慢，可能会漏点(这些点不被sample)，收敛性会有点小问题？
+constexpr int FETCH_SIZE = 8;
 constexpr int BLOCK_LIMIT_SIZE = 96;
 //constexpr int BLOCK_SIZE_CUSTOM = 96;
 
@@ -109,9 +110,9 @@ struct selectedEdgeInfo {
 
 
 // TODO: padding maybe better?
- __device__ volatile uint tail_index;
+ __device__ volatile int tail_index;
 // __device__ volatile uint possible_finished_block_num;
- __device__ uint task_idx;
+ __device__ int task_idx;
 // TODO: if let init_kernel kernel do more things, try overlap it with more host codes
 __global__ void init_kernel(
         thrust::pair<short, int64_t>* queue, uint* bits, const int64_t* const in_rows,
@@ -153,8 +154,8 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         selectedEdgeInfo* result
 //        const int min_iter = 100
         ) {
-    __shared__ uint sharedIndex;
-    __shared__ uint sharedTail;
+    __shared__ int sharedIndex;
+    __shared__ int sharedTail;
     __shared__ short sharedHopNum[FETCH_SIZE];
     __shared__ int64_t sharedRowNum[FETCH_SIZE];
     __shared__ int64_t sharedInRowStart[FETCH_SIZE];
@@ -201,8 +202,8 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     do {
         while (sharedIndex < sharedTail) {
             breakFromLoop = true;
-            fs = sharedTail - sharedIndex < fs ? sharedTail - sharedIndex : fs;
-            std::printf("fs: %d, space: %d\n", fs, sharedTail - sharedIndex);
+            fs = min(sharedTail - sharedIndex, fs);
+//            std::printf("fs: %d, space: %d\n", fs, sharedTail - sharedIndex);
             // run task, same block threads have same task(hop_num, row_num)
             // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
             // just do again, use while loop(any better solution?).
@@ -252,7 +253,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                             if (!bits[bits_offset]) {
                                 auto old = atomicOr(bits + bits_offset, 1);
                                 if (!old) {
-                                    auto tail = atomicAdd((uint *) &tail_index, 1);
+                                    auto tail = atomicAdd((int *) &tail_index, 1);
                                     task_queue[tail].first = hop_num + 1;
                                     task_queue[tail].second = neighbor;
                                     // TODO: we can get next hop srcnodes degree once sampled neighbors are got, can it be used?
@@ -295,7 +296,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                             if (!bits[bits_offset]) {
                                 auto old = atomicOr(bits + bits_offset, 1);
                                 if (!old) {
-                                    auto tail = atomicAdd((uint *) &tail_index, 1);
+                                    auto tail = atomicAdd((int *) &tail_index, 1);
                                     // task_queue[tail] = {hop_num + 1, in_index[perm_idx]};
                                     task_queue[tail].first = hop_num + 1;
                                     task_queue[tail].second = neighbor;
@@ -310,19 +311,21 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                     if (!bits[bits_offset]) {
                         auto old = atomicOr(bits + bits_offset, 1);
                         if (!old) {
-                            auto tail = atomicAdd((uint *) &tail_index, 1);
+                            auto tail = atomicAdd((int *) &tail_index, 1);
                             task_queue[tail].first = hop_num + 1;
                             task_queue[tail].second = row;
                         }
                     }
                 }
+                // 加上速度更快，好像是因为不加会有很多不合并的访存？
+                __syncthreads();
             }
             // all task finish
 //            __syncthreads();
             // update sharedIndex
+            fs = FETCH_SIZE;
             if (threadIdx.x == 0) {
                 sharedIndex = atomicAdd(&task_idx, FETCH_SIZE);
-                fs = FETCH_SIZE;
                 sharedTail = tail_index;
             }
             __syncthreads();
@@ -563,9 +566,9 @@ COOMatrix _CSRRowWiseSamplingUniform(
       DGLContext{kDGLCPU, 0}, mat.indptr->dtype);
   CUDA_CALL(cudaEventRecord(copyEvent, stream));
 
-//  const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
+  const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
   // fix only for reproduce!
-  const uint64_t random_seed = 1234;
+//  const uint64_t random_seed = 1234;
 
   // select edges
   // the number of rows each thread block will cover
