@@ -204,7 +204,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
             // just do again, use while loop(any better solution?).
             // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
-            for (int i = threadIdx.x; threadIdx.x < FETCH_SIZE; i += blockDim.x) {
+            for (int i = threadIdx.x; i < FETCH_SIZE; i += blockDim.x) {
                 short hop_num = task_queue[sharedIndex + i].first;
                 int64_t row = task_queue[sharedIndex + i].second;
                 while (hop_num == 0 || row == -1) {
