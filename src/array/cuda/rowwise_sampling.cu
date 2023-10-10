@@ -157,6 +157,9 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __shared__ uint sharedTail;
     __shared__ short sharedHopNum[FETCH_SIZE];
     __shared__ int64_t sharedRowNum[FETCH_SIZE];
+    __shared__ int64_t sharedInRowStart[FETCH_SIZE];
+    __shared__ int64_t sharedDegree[FETCH_SIZE];
+    __shared__ int64_t sharedNumPick[FETCH_SIZE];
     // num_pick cannot be larger than 128
     // any better solution?
     __shared__ int64_t permList[128];
@@ -201,15 +204,19 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
             // just do again, use while loop(any better solution?).
             // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
-            if (threadIdx.x < FETCH_SIZE) {
-                short hop_num = task_queue[sharedIndex + threadIdx.x].first;
-                int64_t row = task_queue[sharedIndex + threadIdx.x].second;
+            for (int i = threadIdx.x; threadIdx.x < FETCH_SIZE; i += blockDim.x) {
+                short hop_num = task_queue[sharedIndex + i].first;
+                int64_t row = task_queue[sharedIndex + i].second;
                 while (hop_num == 0 || row == -1) {
-                    hop_num = task_queue[sharedIndex + threadIdx.x].first;
-                    row = task_queue[sharedIndex + threadIdx.x].second;
+                    hop_num = task_queue[sharedIndex + i].first;
+                    row = task_queue[sharedIndex + i].second;
                 }
-                sharedHopNum[threadIdx.x] = hop_num;
-                sharedRowNum[threadIdx.x] = row;
+                sharedHopNum[i] = hop_num;
+                sharedRowNum[i] = row;
+                const int64_t in_row_start = in_ptr[row];
+                sharedInRowStart[i] = in_row_start;
+                sharedDegree[i] = in_ptr[row + 1] - in_row_start;
+                sharedNumPick[i] = num_picks[hop_num - 1];
             }
             __syncthreads();
             for (int i = 0; i < FETCH_SIZE; i++)
@@ -218,9 +225,13 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                 int64_t row = sharedRowNum[i];
                 assert(hop_num != 0 && row != -1);
                 // task begin
-                const int64_t in_row_start = in_ptr[row];
-                const int64_t deg = in_ptr[row + 1] - in_row_start;
-                const int64_t num_pick = num_picks[hop_num - 1];
+//                const int64_t in_row_start = in_ptr[row];
+//                const int64_t deg = in_ptr[row + 1] - in_row_start;
+//                const int64_t num_pick = num_picks[hop_num - 1];
+
+                const int64_t in_row_start = sharedInRowStart[i];
+                const int64_t deg = sharedDegree[i];
+                const int64_t num_pick = sharedNumPick[i];
 
                 if (deg <= num_pick) {
                     // just copy row when there is not enough nodes to sample
