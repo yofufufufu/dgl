@@ -166,6 +166,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 
 //    int iter = 0;
     bool breakFromLoop = false;
+    int fs = 1;
     curandStatePhilox4_32_10_t rng;
     // different block has different seed
     // different thread in block has different (sub)sequence
@@ -200,11 +201,13 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     do {
         while (sharedIndex < sharedTail) {
             breakFromLoop = true;
+            fs = sharedTail - sharedIndex < fs ? sharedTail - sharedIndex : fs;
+            std::printf("fs: %d, space: %d\n", fs, sharedTail - sharedIndex);
             // run task, same block threads have same task(hop_num, row_num)
             // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
             // just do again, use while loop(any better solution?).
             // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
-            for (int i = threadIdx.x; i < FETCH_SIZE; i += blockDim.x) {
+            for (int i = threadIdx.x; i < fs; i += blockDim.x) {
                 short hop_num = task_queue[sharedIndex + i].first;
                 int64_t row = task_queue[sharedIndex + i].second;
                 while (hop_num == 0 || row == -1) {
@@ -219,7 +222,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                 sharedNumPick[i] = num_picks[hop_num - 1];
             }
             __syncthreads();
-            for (int i = 0; i < FETCH_SIZE; i++)
+            for (int i = 0; i < fs; i++)
             {
                 short hop_num = sharedHopNum[i];
                 int64_t row = sharedRowNum[i];
@@ -318,7 +321,8 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 //            __syncthreads();
             // update sharedIndex
             if (threadIdx.x == 0) {
-                sharedIndex = atomicAdd(&task_idx, 1);
+                sharedIndex = atomicAdd(&task_idx, FETCH_SIZE);
+                fs = FETCH_SIZE;
                 sharedTail = tail_index;
             }
             __syncthreads();
