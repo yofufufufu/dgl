@@ -306,8 +306,9 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                         }
                     }
                 }
-                // 加上速度更快，好像是因为不加会有很多不合并的访存？
-                // 还是说及时收敛能提高并行效率？可能这时候warp内部也没有收敛
+                // 加上速度更快，好像是因为不加会有很多不合并的访存？(sec/req较高)
+                // 还是说及时收敛能提高并行效率？可能这时候warp内部也没有收敛(但是__syncwarp()还是很慢)
+//                __syncwarp();
                 __syncthreads();
             }
             // all task finish
