@@ -24,7 +24,7 @@ namespace impl {
 namespace {
 
 constexpr int BLOCK_SIZE = 128;
-// 定的太大无法保证task_id的增速比tail慢，可能会漏点(这些点不被sample)，收敛性会有点小问题？
+// TODO: fetch size can be template parameter.
 constexpr int FETCH_SIZE = 8;
 constexpr int BLOCK_LIMIT_SIZE = 96;
 //constexpr int BLOCK_SIZE_CUSTOM = 96;
@@ -108,10 +108,15 @@ struct selectedEdgeInfo {
     int64_t* datas;
 };
 
-
 // TODO: padding maybe better?
+// writes to `tail_index` and `possible_finished_block_num` may not visible to other block threads.
+// if variables are not volatile, the global value may be cached after block threads first read, then they will always read the cached old value.
+// if using the value in condition statement(e.g. while), may cause infinite loop, which causes program hung.
+// `printf` can change data visibility by some ways...
+// see: https://forums.developer.nvidia.com/t/printf-in-cuda-kernel-changes-program-behavior/234524
+// must be volatile!
  __device__ volatile int tail_index;
-// __device__ volatile uint possible_finished_block_num;
+// __device__ volatile int possible_finished_block_num;
  __device__ int task_idx;
 // TODO: if let init_kernel kernel do more things, try overlap it with more host codes
 __global__ void init_kernel(
@@ -121,9 +126,8 @@ __global__ void init_kernel(
     if (tIdx == 0) {
         tail_index = num_rows;
 //        possible_finished_block_num = 0;
-//        task_idx = 0;
-//        task_idx = 1312;
         task_idx = sampleKernelGridSize;
+//        task_idx = 0;
     }
 //    if (tIdx < num_rows * hops) {
 //        int hop_num = 1 + tIdx / num_rows;
@@ -174,26 +178,8 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
     // curand_init(rand_seed, 0, 0, &rng);
 
-    // writes to tail_index and possible_finished_block_num is not visible(at least within a period of time) to other blocks
-    // if variables are not volatile, the value will be cached?
-    // so other blocks will loop infinite time in a very short time, which causes program hung.
-    // `printf` can change data visibility by some ways...
-    // see: https://forums.developer.nvidia.com/t/printf-in-cuda-kernel-changes-program-behavior/234524
-
-//    if (threadIdx.x == 0) {
-//        sharedRes[0] = false;
-//        while (possible_finished_block_num != tail_index) {
-//            if (blockIdx.x < tail_index) {
-//                sharedRes[0] = true;
-//                break;
-//            }
-//        }
-//    }
-//    __syncthreads();
-
     // first time
     if (threadIdx.x == 0) {
-        // TODO: fetch size only 1. we can use template.
 //        sharedIndex = atomicAdd(&task_idx, FETCH_SIZE);
         sharedIndex = blockIdx.x;
         sharedTail = tail_index;
@@ -201,13 +187,16 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __syncthreads();
     do {
         while (sharedIndex < sharedTail) {
+            // 如果初始task的数量大于numBlocks, 后面的东西完全可以不要(会是最快的)，因为完成任务后有sync, fetch size = 1的情况下sharedTask的增长一定比tail慢
+            // 所以只要从while中break出来，说明一定没有任务了
+            // 但是如果多个hop总task的数量都无法大于numBlocks，那么有几个block就不可能进入循环，breakFromLoop就会一直是false, 这几个block就不会退出
+            // 所以我需要保证多个hop总task的数量大于numBlocks, 并且每个block都至少完成一次循环，所以第一次分配任务时我用了blockIdx.x而不是atomicAdd(&task_idx, 1), 初始化task_idx用了gridSize而不是0.
             breakFromLoop = true;
             fs = min(sharedTail - sharedIndex, fs);
-//            std::printf("fs: %d, space: %d\n", fs, sharedTail - sharedIndex);
             // run task, same block threads have same task(hop_num, row_num)
             // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
             // just do again, use while loop(any better solution?).
-            // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
+            // `task_queue` also must be volatile, or it will be cached, causing infinite loop.
             for (int i = threadIdx.x; i < fs; i += blockDim.x) {
                 short hop_num = task_queue[sharedIndex + i].first;
                 int64_t row = task_queue[sharedIndex + i].second;
@@ -318,11 +307,17 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
                     }
                 }
                 // 加上速度更快，好像是因为不加会有很多不合并的访存？
+                // 还是说及时收敛能提高并行效率？可能这时候warp内部也没有收敛
                 __syncthreads();
             }
             // all task finish
 //            __syncthreads();
+
             // update sharedIndex
+            // fetch size > 1尤其是更大时，就无法保证task_id的增速比tail慢，因此可能出现部分block分不到fetch size大小任务的情况(比如fetch 8但是当前最多只有fs=4个任务)
+            // 如果像这样完成fs大小任务后就更新，可能会漏点(这些点不被sample)，收敛性会有点小问题？
+            // 所以如果是上述情况，就要把sharedIndex更新为第一个未完成的任务，并更新sharedTail
+            // 此时就不能把从while循环中break(即`breakFromLoop`)作为没有任务的条件了，要使用`min_iter`等一段时间判断是否真的没有任务了(可能很暴力但可能是最简单高效的方法了)
             fs = FETCH_SIZE;
             if (threadIdx.x == 0) {
                 sharedIndex = atomicAdd(&task_idx, FETCH_SIZE);
@@ -342,11 +337,6 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         }
         __syncthreads();
 
-        // 如果初始task的数量大于numBlocks, 后面的东西完全可以不要(会是最快的)，因为完成任务后有sync, fetch size = 1的情况下sharedTask的增长一定比tail慢
-        // 所以只要从while中break出来，说明一定没有任务了
-        // 但是如果多个hop总task的数量都无法大于numBlocks，那么有几个block就不可能进入循环，breakFromLoop就会一直是false, 这几个block就不会退出
-        // 所以我需要保证多个hop总task的数量大于numBlocks, 并且每个block都至少完成一次循环，所以第一次分配任务时我用了blockIdx.x而不是atomicAdd(&task_idx, 1), 初始化task_idx用了1312.
-        // fetch size > 1时，就可能出现部分block分不到fetch size大小任务的情况，代码就会复杂
 //        if(possible_finished_block_num == gridDim.x)
 //            break;
 //        __syncthreads();
@@ -354,7 +344,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 //        {
 //            iter++;
 //            if(iter == min_iter)
-//                atomicAdd((uint*)&possible_finished_block_num, 1);
+//                atomicAdd((int*)&possible_finished_block_num, 1);
 //        }
     } while (true);
 
@@ -622,7 +612,6 @@ COOMatrix CSRRowWiseSamplingUniform(
   }
 }
 
-//uint historical_max_queue_size = 0;
 std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         CSRMatrix mat, IdArray rows, const IdArray &num_picks) {
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism run here\n");
@@ -631,7 +620,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     auto device = runtime::DeviceAPI::Get(ctx);
     cudaStream_t stream = runtime::getCurrentCUDAStream();
 
-    // 1-hop seed nodes number
+    // first hop seed nodes number
     const int64_t num_rows = rows->shape[0];
     const auto hops = num_picks->shape[0];
 
@@ -674,7 +663,6 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 
     // init
     const dim3 init_block(512);
-//    const dim3 init_grid((num_rows + init_block.x - 1) / init_block.x);
 //    const dim3 init_grid((num_rows * hops + init_block.x - 1) / init_block.x);
     const dim3 init_grid((queue_cap + init_block.x - 1) / init_block.x);
     CUDA_KERNEL_CALL((init_kernel), init_grid, init_block, 0, stream, task_queue, bool_arr, sliced_rows, num_rows, hops, queue_cap, sampleKernelNumBlock);
@@ -728,14 +716,6 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         ret_coo[i] = COOMatrix(mat.num_rows, mat.num_cols, picked_rows[i], picked_cols[i], picked_indices[i]);
     }
     nvtxRangePop();
-
-    //TODO: we can do this only one epoch
-//    uint actual_queue_size;
-//    CUDA_CALL(cudaMemcpyFromSymbol(&actual_queue_size, tail_index, sizeof(uint), 0));
-    // for correctness
-    // (if not all producer has finished their job, actual_queue_size is not the corrct value too)
-//    assert(actual_queue_size <= est_queue_cap);
-//    historical_max_queue_size = std::max(historical_max_queue_size, actual_queue_size);
 
     nvtxRangePushA("free container");
     free(struct_arr_h);
