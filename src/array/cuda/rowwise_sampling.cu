@@ -187,11 +187,6 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __syncthreads();
     do {
         while (sharedIndex < sharedTail) {
-            // 如果初始task的数量大于numBlocks, 后面的东西完全可以不要(会是最快的)，因为完成任务后有sync, fetch size = 1的情况下sharedTask的增长一定比tail慢
-            // 所以只要从while中break出来，说明一定没有任务了
-            // 但是如果多个hop总task的数量都无法大于numBlocks，那么有几个block就不可能进入循环，breakFromLoop就会一直是false, 这几个block就不会退出
-            // 所以我需要保证多个hop总task的数量大于numBlocks, 并且每个block都至少完成一次循环，所以第一次分配任务时我用了blockIdx.x而不是atomicAdd(&task_idx, 1), 初始化task_idx用了gridSize而不是0.
-            breakFromLoop = true;
             fs = min(sharedTail - sharedIndex, fs);
             // run task, same block threads have same task(hop_num, row_num)
             // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
@@ -316,14 +311,41 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 
             // update sharedIndex
             // fetch size > 1尤其是更大时，就无法保证task_id的增速比tail慢，因此可能出现部分block分不到fetch size大小任务的情况(比如fetch 8但是当前最多只有fs=4个任务)
-            // 如果像这样完成fs大小任务后就更新，可能会漏点(这些点不被sample)，收敛性会有点小问题？
+            // 如果像这样完成fs大小任务后就更新，大概率会漏点(这些点不被sample)，收敛性会有点小问题？
             // 所以如果是上述情况，就要把sharedIndex更新为第一个未完成的任务，并更新sharedTail
             // 此时就不能把从while循环中break(即`breakFromLoop`)作为没有任务的条件了，要使用`min_iter`等一段时间判断是否真的没有任务了(可能很暴力但可能是最简单高效的方法了)
-            fs = FETCH_SIZE;
-            if (threadIdx.x == 0) {
-                sharedIndex = atomicAdd(&task_idx, FETCH_SIZE);
-                sharedTail = tail_index;
+            // 或者说干脆只拿min(FETCH_SIZE, sharedTail-sharedIndex)，反正拿多了也是要等的，但是想要及时的判断该拿多少很难
+            if (!breakFromLoop) {
+                fs = FETCH_SIZE;
+                if (threadIdx.x == 0) {
+                    sharedIndex = atomicAdd(&task_idx, FETCH_SIZE);
+                    sharedTail = tail_index;
+                }
             }
+            else if (fs == FETCH_SIZE) {
+//                fs = FETCH_SIZE;
+                if (threadIdx.x == 0) {
+                    sharedIndex = atomicAdd(&task_idx, FETCH_SIZE);
+                    sharedTail = tail_index;
+                }
+            }
+            // 最正确的做法就是我上面讲的跳出while使用`min_iter`, 但是在fetch size不是很大的情况下，即使出现部分block分不到fetch size大小任务的情况
+            // 完成这些不到fetch size大小的任务后，剩余的任务也应该就绪了(最差的情况也是不停地自产自销)
+            // 因此跳出循环还是可以看做没有任务的条件
+            // 还是不能把fetch size调的太大，一定要保证task_idx的更新慢于tail, 这个方案依旧无法解决task_idx大于tail的情况，此时block直接退出，分到的任务也永远被忽略！
+            // 这个方案基本聊胜于无！因为出现这种分不到fetch size大小任务的情况时，马上就会产生task_idx大于tail的情况
+            else {
+                fs -= (sharedTail - sharedIndex);
+                if (threadIdx.x == 0) {
+                    sharedIndex += (sharedTail - sharedIndex);
+                    sharedTail = tail_index;
+                }
+            }
+            // 如果初始task的数量大于numBlocks, 因为完成任务后有sync, fetch size = 1的情况下sharedTask的增长一定比tail慢
+            // 所以只要从while中break出来，说明一定没有任务了
+            // 但是如果多个hop总task的数量都无法大于numBlocks，那么有几个block就不可能进入循环，breakFromLoop就会一直是false, 这几个block就不会退出
+            // 所以我需要保证多个hop总task的数量大于numBlocks, 并且每个block都至少完成一次循环，所以第一次分配任务时我用了blockIdx.x而不是atomicAdd(&task_idx, 1), 初始化task_idx用了gridSize而不是0.
+            breakFromLoop = true;
             __syncthreads();
         }
         // 不加这个同步ncu batchsize<1312的时候profile会出错，但是正常运行程序却没问题?
