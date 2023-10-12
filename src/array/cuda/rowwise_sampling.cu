@@ -165,9 +165,9 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __shared__ int64_t sharedInRowStart[FETCH_SIZE];
     __shared__ int64_t sharedDegree[FETCH_SIZE];
     __shared__ int64_t sharedNumPick[FETCH_SIZE];
-    // num_pick cannot be larger than 128
+    // num_pick cannot be larger than 64
     // any better solution?
-    __shared__ int64_t permList[128];
+    __shared__ int64_t permList[64];
 
 //    int iter = 0;
     bool breakFromLoop = false;
@@ -211,7 +211,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             {
                 short hop_num = sharedHopNum[i];
                 int64_t row = sharedRowNum[i];
-                assert(hop_num != 0 && row != -1);
+//                assert(hop_num != 0 && row != -1);
                 // task begin
 //                const int64_t in_row_start = in_ptr[row];
 //                const int64_t deg = in_ptr[row + 1] - in_row_start;
@@ -370,7 +370,6 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 //                atomicAdd((int*)&possible_finished_block_num, 1);
 //        }
     } while (true);
-
 }
 
 /**
