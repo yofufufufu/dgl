@@ -637,9 +637,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         // 2-layer may almost no problem
         // [10, 10, 10] almost no problem
         // manually change it when batch_size(`num_rows`) small, for [15, 15, 15](maybe num_rows * 2) and [20, 20, 20](maybe num_rows * 4)
-    if (num_rows == 1024 && num_picks_vec[0] == 15)
+    if ((num_rows == 1024 || num_rows == 2048) && num_picks_vec[0] == 15)
         est_queue_cap = historical_max_queue_size + num_rows * 2;
-    else if(num_rows == 1024 && num_picks_vec[0] == 20)
+    else if((num_rows == 1024 || num_rows == 2048) && num_picks_vec[0] == 20)
         est_queue_cap = historical_max_queue_size + num_rows * 3;
     else
         est_queue_cap = historical_max_queue_size + num_rows;
