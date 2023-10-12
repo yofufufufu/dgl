@@ -497,9 +497,9 @@ COOMatrix _CSRRowWiseSamplingUniform(
       DGLContext{kDGLCPU, 0}, mat.indptr->dtype);
   CUDA_CALL(cudaEventRecord(copyEvent, stream));
 
-//  const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
+  const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
   // fix only for reproduce!
-  const uint64_t random_seed = 1234;
+//  const uint64_t random_seed = 1234;
 
   // select edges
   // the number of rows each thread block will cover
@@ -624,9 +624,9 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     CUDA_CALL(cudaMemcpy(struct_arr_d, struct_arr_h, sizeof(selectedEdgeInfo) * hops, cudaMemcpyHostToDevice));
     nvtxRangePop();
 
-//    const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
+    const uint64_t random_seed = RandomEngine::ThreadLocal()->RandInt(1000000000);
     // fix only for reproduce!
-    const uint64_t random_seed = 1234;
+//    const uint64_t random_seed = 1234;
 
     const dim3 block(BLOCK_SIZE_CUSTOM);
     uint est_queue_cap;
