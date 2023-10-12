@@ -24,7 +24,6 @@ namespace impl {
 namespace {
 
 constexpr int BLOCK_SIZE = 128;
-// TODO: fetch size can be template parameter.
 constexpr int FETCH_SIZE = 8;
 constexpr int BLOCK_LIMIT_SIZE = 96;
 //constexpr int BLOCK_SIZE_CUSTOM = 96;
@@ -145,6 +144,7 @@ __global__ void init_kernel(
     }
 }
 
+template <int FETCH_SIZE>
 // TODO: blockLimitSize和launch bounds的参数最后可以慢慢调
 __launch_bounds__(BLOCK_LIMIT_SIZE)
 __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
@@ -681,7 +681,11 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     int sampleKernelNumThread;
     // Returns grid and block size that achieves maximum potential occupancy for a device function.
     nvtxRangePushA("get sample kernel grid and block size");
-    cudaOccupancyMaxPotentialBlockSize(&sampleKernelNumBlock, &sampleKernelNumThread, _CSRRowWiseSampleUniformTaskParallelismKernel , 0, BLOCK_LIMIT_SIZE);
+    cudaOccupancyMaxPotentialBlockSize(&sampleKernelNumBlock,
+                                       &sampleKernelNumThread,
+                                       _CSRRowWiseSampleUniformTaskParallelismKernel<FETCH_SIZE>,
+                                               0,
+                                               BLOCK_LIMIT_SIZE);
     nvtxRangePop();
 
     // init
@@ -721,7 +725,7 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
     const dim3 block(sampleKernelNumThread);
     const dim3 grid(sampleKernelNumBlock);
 //    std::printf("cuda kernel launched\n");
-    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel), grid, block, 0, stream,
+    CUDA_KERNEL_CALL((_CSRRowWiseSampleUniformTaskParallelismKernel<FETCH_SIZE>), grid, block, 0, stream,
                      random_seed, num_picks_ptr, vector_lens, num_rows, hops, mat.num_rows, in_ptr, in_cols, data,
                      task_queue, bool_arr, struct_arr_d);
 //    assert(task_queue.empty());
