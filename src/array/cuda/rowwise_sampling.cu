@@ -105,9 +105,9 @@ struct selectedEdgeInfo {
     int64_t* datas;
 };
 
- __device__ uint tail_index;
+ __device__ int tail_index;
 // __device__ volatile uint finished_block_num;
- __device__ uint task_idx;
+ __device__ int task_idx;
 //TODO: if let init_kernel kernel do more things, try overlap it with more host codes
 __global__ void init_kernel(
         thrust::pair<short, int64_t>* queue, uint* bits, const int64_t* const in_rows,
@@ -134,6 +134,73 @@ __global__ void init_kernel(
     }
 }
 
+__launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void childKernel(
+        const uint64_t rand_seed, const int64_t * num_picks, uint* vector_lens,
+        const int64_t num_rows, const int hops,
+        const int64_t * const in_ptr, const int64_t * const in_index, const int64_t * const data,
+        volatile thrust::pair<short, int64_t>* task_queue,
+        selectedEdgeInfo* result
+        ) {
+//    __shared__ int sharedTask;
+    __shared__ int64_t permList[128];
+
+//    if (threadIdx.x == 0) {
+//        // can use blockID in child kernel?
+//        sharedTask = atomicAdd(&task_idx, 1);
+//    }
+//    __syncthreads();
+
+    curandStatePhilox4_32_10_t rng;
+    curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
+
+//    auto const taskid = sharedTask;
+    auto const taskid = task_idx + blockIdx.x;
+    short hop_num = task_queue[taskid].first;
+    int64_t row = task_queue[taskid].second;
+    while (hop_num == 0 || row == -1) {
+        hop_num = task_queue[taskid].first;
+        row = task_queue[taskid].second;
+    }
+
+    const int64_t in_row_start = in_ptr[row];
+    const int64_t deg = in_ptr[row + 1] - in_row_start;
+    const int64_t num_pick = num_picks[hop_num - 1];
+
+    if (deg <= num_pick) {
+        for (int idx = threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
+            const int64_t in_idx = in_row_start + idx;
+            const int64_t neighbor = in_index[in_idx];
+            auto index = atomicAdd(vector_lens + (hop_num - 1), 1);
+            result[hop_num - 1].rows[index] = row;
+            result[hop_num - 1].cols[index] = neighbor;
+            result[hop_num - 1].datas[index] = data ? data[in_idx] : in_idx;
+        }
+    } else {
+        for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
+            permList[idx] = idx;
+        }
+        __syncthreads();
+
+        for (int idx = num_pick + threadIdx.x; idx < deg; idx += BLOCK_SIZE_CUSTOM) {
+            const int num = curand(&rng) % (idx + 1);
+            if (num < num_pick) {
+                // use shared memory, faster than DGL?
+                AtomicMax(permList + num, idx);
+            }
+        }
+        __syncthreads();
+
+        for (int idx = threadIdx.x; idx < num_pick; idx += BLOCK_SIZE_CUSTOM) {
+            const int64_t perm_idx = permList[idx] + in_row_start;
+            const int64_t neighbor = in_index[perm_idx];
+            auto index = atomicAdd(vector_lens + (hop_num - 1), 1);
+            result[hop_num - 1].rows[index] = row;
+            result[hop_num - 1].cols[index] = neighbor;
+            result[hop_num - 1].datas[index] = data ? data[perm_idx] : perm_idx;
+        }
+    }
+}
+
 __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
         const uint64_t rand_seed, const int64_t * num_picks, uint* vector_lens,
         const int64_t num_rows, const int hops, const int64_t total_num_rows,
@@ -143,9 +210,8 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
         uint* bits,
         selectedEdgeInfo* result
         ) {
-//    __shared__ int64_t blockTask[2];
-    __shared__ bool sharedRes[1];
-    __shared__ uint sharedTask[1];
+    __shared__ bool sharedRes;
+    __shared__ int sharedTask;
     // num_pick cannot be larger than 128
     // any better solution?
     __shared__ int64_t permList[128];
@@ -169,20 +235,20 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
 
     if (threadIdx.x == 0) {
         auto taskid = atomicAdd(&task_idx, 1);
-        sharedTask[0] = taskid;
+        sharedTask = taskid;
         if (taskid >= tail_index) {
             // theoretical max block resident on 3090 when block size 96, and training need drop last when batchSize < 1312
             if (taskid < 1312)
-                sharedRes[0] = true;
+                sharedRes = true;
             else
-                sharedRes[0] = false;
+                sharedRes = false;
         }
         else
-            sharedRes[0] = true;
+            sharedRes = true;
     }
     __syncthreads();
 
-    if (sharedRes[0]) {
+    if (sharedRes) {
         curandStatePhilox4_32_10_t rng;
         // different block has different seed
         // different thread in block has different (sub)sequence
@@ -193,7 +259,7 @@ __launch_bounds__(BLOCK_SIZE_CUSTOM) __global__ void _CSRRowWiseSampleUniformTas
         // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
         // just do again, use while loop(any better solution?).
         // `task_queue` also must be volatile, or it will be cached, causing loop infinite time
-        auto const taskid = sharedTask[0];
+        auto const taskid = sharedTask;
         short hop_num = task_queue[taskid].first;
         int64_t row = task_queue[taskid].second;
         while (hop_num == 0 || row == -1) {
@@ -553,7 +619,7 @@ COOMatrix CSRRowWiseSamplingUniform(
   }
 }
 
-uint historical_max_queue_size = 0;
+int historical_max_task_num = 0;
 std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         CSRMatrix mat, IdArray rows, const IdArray &num_picks) {
 //    std::printf("CustomCSRRowWiseSamplingUniformTaskParallelism run here\n");
@@ -629,26 +695,13 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    const uint64_t random_seed = 1234;
 
     const dim3 block(BLOCK_SIZE_CUSTOM);
-    uint est_queue_cap;
-    if (historical_max_queue_size == 0)
-        est_queue_cap = queue_cap;
+    uint est_task_num;
+    if (historical_max_task_num == 0)
+        est_task_num = queue_cap;
     else
-        // more extreme
-        // 2-layer may almost no problem
-        // [10, 10, 10] almost no problem
-        // manually change it when batch_size(`num_rows`) small, for [15, 15, 15](maybe num_rows * 2) and [20, 20, 20](maybe num_rows * 4)
-    if ((num_rows == 1024 || num_rows == 2048) && num_picks_vec[0] == 15)
-        est_queue_cap = historical_max_queue_size + num_rows * 2;
-    else if((num_rows == 1024 || num_rows == 2048) && num_picks_vec[0] == 20)
-        est_queue_cap = historical_max_queue_size + num_rows * 3;
-    else
-        est_queue_cap = historical_max_queue_size + num_rows;
-//        est_queue_cap = historical_max_queue_size + num_rows * 2;
-//        est_queue_cap = historical_max_queue_size + num_rows * 4;
-    const dim3 grid(est_queue_cap);
-//    const dim3 grid(num_rows);
-//    const dim3 grid(num_rows * hops);
-//    const dim3 grid(1);
+//        est_task_num = historical_max_task_num + num_rows;
+        est_task_num = historical_max_task_num;
+    const dim3 grid(est_task_num);
 
     uint* vector_lens = static_cast<uint *>(device->AllocWorkspace(ctx, hops * sizeof(uint)));
     CUDA_CALL(cudaMemset(vector_lens, 0, hops * sizeof(uint)));
@@ -660,6 +713,22 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
 //    assert(task_queue.empty());
 //    CUDA_CALL(cudaDeviceSynchronize());
 //    std::printf("cuda kernel finished\n");
+    int total_task_num, finished_task_num;
+    CUDA_CALL(cudaMemcpyFromSymbol(&total_task_num, tail_index, sizeof(int), 0));
+    CUDA_CALL(cudaMemcpyFromSymbol(&finished_task_num, task_idx, sizeof(int), 0));
+    auto residual_task_num = total_task_num - finished_task_num;
+    if (residual_task_num > 0) {
+        const dim3 child_kernel_block(BLOCK_SIZE_CUSTOM);
+        const dim3 child_kernel_grid(residual_task_num);
+        CUDA_KERNEL_CALL((childKernel), child_kernel_grid, child_kernel_block, 0, stream,
+                         random_seed, num_picks_ptr, vector_lens, num_rows, hops, in_ptr, in_cols, data,
+                         task_queue, struct_arr_d);
+    }
+    //TODO: we can do this only one epoch
+    historical_max_task_num = std::max(historical_max_task_num, total_task_num);
+    // only for debug
+    CUDA_CALL(cudaMemcpyFromSymbol(&finished_task_num, task_idx, sizeof(int), 0));
+    assert(finished_task_num == est_task_num);
 
     nvtxRangePushA("get result");
     //TODO: cannot overlap with host(DGL can)
@@ -672,14 +741,6 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
         ret_coo[i] = COOMatrix(mat.num_rows, mat.num_cols, picked_rows[i], picked_cols[i], picked_indices[i]);
     }
     nvtxRangePop();
-
-    //TODO: we can do this only one epoch
-    uint actual_queue_size;
-    CUDA_CALL(cudaMemcpyFromSymbol(&actual_queue_size, tail_index, sizeof(uint), 0));
-    // for correctness
-    // (if not all producer has finished their job, actual_queue_size is not the corrct value too)
-    assert(actual_queue_size <= est_queue_cap);
-    historical_max_queue_size = std::max(historical_max_queue_size, actual_queue_size);
 
     nvtxRangePushA("free container");
     free(struct_arr_h);
