@@ -24,7 +24,7 @@ namespace impl {
 namespace {
 
 constexpr int BLOCK_SIZE = 128;
-constexpr int FETCH_SIZE = 8;
+constexpr int FETCH_SIZE = 5;
 constexpr int BLOCK_LIMIT_SIZE = 96;
 //constexpr int BLOCK_SIZE_CUSTOM = 96;
 
@@ -171,6 +171,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
 
 //    int iter = 0;
     bool breakFromLoop = false;
+    // fs init value 1, because we use blockID as taskID in first loop
     int fs = 1;
     curandStatePhilox4_32_10_t rng;
     // different block has different seed
