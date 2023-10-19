@@ -646,10 +646,13 @@ std::vector<COOMatrix> CustomCSRRowWiseSamplingUniformTaskParallelism(
                           : nullptr;
     const int64_t* num_picks_ptr = static_cast<int64_t*>(GetDevicePointer(num_picks));
 
-    uint queue_cap = num_rows;
+    int64_t queue_cap = num_rows;
     // last hop sample result do not need to enqueue
-    for (int i = 0; i < hops - 1; i++)
-        queue_cap += queue_cap * (num_picks_vec[i] + 1);
+    for (int i = 0; i < hops - 1; i++) {
+        // num of new tasks are smaller than graph total vertices
+        auto new_tasks = std::min(queue_cap * (num_picks_vec[i] + 1), mat.num_rows);
+        queue_cap += new_tasks;
+    }
     nvtxRangePushA("create task_queue");
     auto task_queue = static_cast<thrust::pair<short, int64_t> *>(device->AllocWorkspace(ctx, queue_cap * sizeof(thrust::pair<short, int64_t>)));
 //    auto task_queue = stdgpu::queue<thrust::pair<short, int64_t>>::createDeviceObject(queue_cap);
