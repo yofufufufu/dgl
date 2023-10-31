@@ -170,14 +170,15 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __shared__ int64_t permList[64];
 
 //    int iter = 0;
+    int iter_num = 0;
     bool breakFromLoop = false;
     // fs init value 1, because we use blockID as taskID in first loop
     int fs = 1;
-    curandStatePhilox4_32_10_t rng;
-    // different block has different seed
-    // different thread in block has different (sub)sequence
-    curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
-    // curand_init(rand_seed, 0, 0, &rng);
+//    curandStatePhilox4_32_10_t rng;
+//    // different block has different seed
+//    // different thread in block has different (sub)sequence
+//    curand_init(rand_seed * gridDim.x + blockIdx.x, threadIdx.x, 0, &rng);
+//    // curand_init(rand_seed, 0, 0, &rng);
 
     // first time
     if (threadIdx.x == 0) {
@@ -188,6 +189,7 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
     __syncthreads();
     do {
         while (sharedIndex < sharedTail) {
+            iter_num++;
             fs = min(sharedTail - sharedIndex, fs);
             // run task, same block threads have same task(hop_num, row_num)
             // write to task queue may not visible, so task will be init_kernel value, i.e.{0,-1}
@@ -210,6 +212,10 @@ __global__ void _CSRRowWiseSampleUniformTaskParallelismKernel(
             __syncthreads();
             for (int i = 0; i < fs; i++)
             {
+                curandStatePhilox4_32_10_t rng;
+                // 处理每个顶点时使用不同的seed进行init(就和block和顶点一一映射时一样)，这样性能会好一点(尤其是平均度大的数据集，不知道为什么...)
+                curand_init(iter_num * rand_seed * gridDim.x + blockIdx.x + i * gridDim.x, threadIdx.x, 0, &rng);
+                // curand_init(rand_seed, 0, 0, &rng);
                 short hop_num = sharedHopNum[i];
                 int64_t row = sharedRowNum[i];
 //                assert(hop_num != 0 && row != -1);
